@@ -8,8 +8,9 @@ $script:BIN       = Join-Path $BaseDir "bin\dagtech-gpu-miner.exe"
 $script:CONFIG    = Join-Path $BaseDir "config.env"
 $script:LOGDIR    = Join-Path $BaseDir "logs"
 $script:DASHBOARD = Join-Path $BaseDir "dashboard\index.html"
-$script:STOPFILE  = Join-Path $BaseDir "logs\.stop"
-$PIDFILE          = Join-Path $BaseDir "logs\control.pid"
+$script:STOPFILE   = Join-Path $BaseDir "logs\.stop"
+$script:MINERPIDF  = Join-Path $BaseDir "logs\miner.pid"
+$PIDFILE           = Join-Path $BaseDir "logs\control.pid"
 
 if (-not (Test-Path $script:LOGDIR)) { New-Item -ItemType Directory -Path $script:LOGDIR | Out-Null }
 [System.IO.File]::WriteAllText($PIDFILE, "$PID")
@@ -38,7 +39,16 @@ function Read-Config {
 }
 
 function Get-MinerProcess {
-    return Get-Process -Name "dagtech-gpu-miner" -ErrorAction SilentlyContinue | Select-Object -First 1
+    # Try saved PID first — reliable even if the name lookup fails
+    if (Test-Path $script:MINERPIDF) {
+        try {
+            $savedPid = [int]((Get-Content $script:MINERPIDF -Raw -ErrorAction Stop).Trim())
+            $p = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+            if ($p -and $p.Name -match 'dagtech') { return $p }
+        } catch {}
+    }
+    # Fall back to name search
+    return Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue | Select-Object -First 1
 }
 
 function Build-MinerArgList([hashtable]$cfg) {
@@ -74,14 +84,31 @@ function Start-MinerProcess {
     $logFile = Join-Path $script:LOGDIR "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
     $argList = Build-MinerArgList $cfg
     Write-Log "Starting GPU miner..."
-    Start-Process -FilePath $script:BIN -ArgumentList $argList.ToArray() `
-        -RedirectStandardOutput $logFile -RedirectStandardError $logFile.Replace('.log','.err.log') -NoNewWindow
+    $proc = Start-Process -FilePath $script:BIN -ArgumentList $argList.ToArray() `
+        -RedirectStandardOutput $logFile -RedirectStandardError $logFile.Replace('.log','.err.log') `
+        -NoNewWindow -PassThru
+    if ($proc) {
+        try { "$($proc.Id)" | Out-File $script:MINERPIDF -Encoding ASCII -Force } catch {}
+        Write-Log "GPU miner started (PID $($proc.Id))"
+    }
 }
 
 function Stop-MinerProcess {
     "" | Out-File $script:STOPFILE -Force -Encoding ASCII
-    $proc = Get-MinerProcess
-    if ($proc) { $proc | Stop-Process -Force; Write-Log "Miner stopped." }
+    # Kill by tracked PID first (most reliable)
+    $killedPid = $null
+    if (Test-Path $script:MINERPIDF) {
+        try {
+            $savedPid = [int]((Get-Content $script:MINERPIDF -Raw -ErrorAction Stop).Trim())
+            $p = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+            if ($p) { $p | Stop-Process -Force -ErrorAction SilentlyContinue; $killedPid = $savedPid }
+        } catch {}
+        Remove-Item $script:MINERPIDF -Force -ErrorAction SilentlyContinue
+    }
+    # Also sweep by name to catch any instance not tracked by PID
+    Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Log "Miner stopped (pid=$killedPid)."
 }
 
 function Send-Response {
@@ -101,30 +128,8 @@ function Send-Response {
     } catch { }
 }
 
-# Watchdog timer - fires every 30 s on a threadpool thread
-$timer = New-Object System.Timers.Timer
-$timer.Interval = 30000
-$timer.AutoReset = $true
-$timer.Add_Elapsed({
-    if (-not (Test-Path $script:STOPFILE) -and -not (Get-Process -Name "dagtech-gpu-miner" -ErrorAction SilentlyContinue)) {
-        $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Watchdog: miner not running, restarting..."
-        Write-Host $line
-        try {
-            $logPath = Join-Path $script:LOGDIR "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
-            $fs = New-Object System.IO.FileStream($logPath, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
-            $sw = New-Object System.IO.StreamWriter($fs, [System.Text.Encoding]::UTF8)
-            $sw.WriteLine($line)
-            $sw.Close(); $fs.Close()
-        } catch {}
-
-        $cfg = Read-Config
-        $logFile = Join-Path $script:LOGDIR "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
-        $argList = Build-MinerArgList $cfg
-        Start-Process -FilePath $script:BIN -ArgumentList $argList.ToArray() `
-            -RedirectStandardOutput $logFile -RedirectStandardError $logFile.Replace('.log','.err.log') -NoNewWindow
-    }
-})
-$timer.Start()
+# Watchdog — checked inline on the main thread after each request (no threading issues)
+$script:LastWatchdog = [datetime]::UtcNow
 
 # Start listener
 $listener = New-Object System.Net.HttpListener
@@ -478,7 +483,16 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
     } catch {
         Write-Log "Request error: $_"
     }
+
+    # Inline watchdog: runs on the main thread every 30 s — no threading issues
+    $now = [datetime]::UtcNow
+    if (($now - $script:LastWatchdog).TotalSeconds -ge 30) {
+        $script:LastWatchdog = $now
+        if (-not (Test-Path $script:STOPFILE) -and -not (Get-MinerProcess)) {
+            Write-Log "Watchdog: miner not running, restarting..."
+            Start-MinerProcess
+        }
+    }
 }
 
-$timer.Stop()
 Write-Log "Control server stopped."
