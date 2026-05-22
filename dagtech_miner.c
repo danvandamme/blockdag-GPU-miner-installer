@@ -109,7 +109,7 @@ static int  cpu_priority       = 0;  /* 0=normal, 1=low */
 static int  cpu_limit          = 100; /* 1-100: % of CPU time to use per thread */
 static volatile int running    = 1;
 static volatile int keep_alive = 1;  /* 0 = clean program exit; stays 1 across reconnects */
-static int  metrics_port       = 8880;  /* built-in metrics/dashboard endpoint */
+static int  metrics_port       = 8881;  /* built-in metrics/dashboard endpoint */
 static char dashboard_dir[512] = "";
 
 /* GPU configuration */

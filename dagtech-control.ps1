@@ -1,6 +1,6 @@
 # DagTech GPU Miner Control Server
 # Serves the dashboard and manages the GPU miner process lifecycle.
-# Runs on port 8880 so the dashboard stays accessible when the miner is down.
+# Runs on port 8881 so the dashboard stays accessible when the miner is down.
 param([string]$BaseDir = (Split-Path (Split-Path $MyInvocation.MyCommand.Path) -Parent))
 
 $script:BASE      = $BaseDir
@@ -50,7 +50,7 @@ function Build-MinerArgList([hashtable]$cfg) {
         "--threads",      $(if ($cfg["THREADS"])     { $cfg["THREADS"] }     else { "1" }),
         "--worker",       $(if ($cfg["WORKER_NAME"]) { $cfg["WORKER_NAME"] } else { "dagtech" }),
         "--cpu-limit",    $(if ($cfg["CPU_LIMIT"])   { $cfg["CPU_LIMIT"] }   else { "100" }),
-        "--metrics-port", $(if ($cfg["METRICS_PORT"]){ $cfg["METRICS_PORT"]} else { "8880" }),
+        "--metrics-port", $(if ($cfg["METRICS_PORT"]){ $cfg["METRICS_PORT"]} else { "8881" }),
         "--dashboard-dir",(Join-Path $script:BASE "dashboard")
     ))
     if ($cfg["POOL_PASSWORD"]) { $argList.Add("--password"); $argList.Add($cfg["POOL_PASSWORD"]) }
@@ -128,15 +128,15 @@ $timer.Start()
 
 # Start listener
 $listener = New-Object System.Net.HttpListener
-$listener.Prefixes.Add("http://127.0.0.1:8880/")
+$listener.Prefixes.Add("http://127.0.0.1:8881/")
 try {
     $listener.Start()
 } catch {
-    Write-Host "ERROR: Could not bind port 8880 - is another instance already running?"
+    Write-Host "ERROR: Could not bind port 8881 - is another instance already running?"
     exit 1
 }
 
-Write-Log "Control server listening on http://127.0.0.1:8880/"
+Write-Log "Control server listening on http://127.0.0.1:8881/"
 
 # Clear any leftover stop file and start the miner
 if (Test-Path $script:STOPFILE) { Remove-Item $script:STOPFILE -Force }

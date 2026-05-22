@@ -580,7 +580,7 @@
                 </div>
                 <div class="form-group" style="max-width:50%">
                     <label class="form-label">Metrics Port</label>
-                    <input class="form-input" id="cfgMetricsPort" type="number" placeholder="8880">
+                    <input class="form-input" id="cfgMetricsPort" type="number" placeholder="8881">
                 </div>
                 <div class="modal-footer">
                     <div class="modal-status" id="configStatus"></div>
@@ -727,7 +727,7 @@
                 <div class="info-row"><span class="info-label">Device</span><span class="info-value" id="gpuDevice">--</span></div>
                 <div class="info-row"><span class="info-label">GPU Hashrate</span><span class="info-value" id="gpuHashrateInfo">--</span></div>
                 <div class="info-row"><span class="info-label">Mining Mode</span><span class="info-value" id="miningMode">--</span></div>
-                <div class="info-row"><span class="info-label">Metrics Port</span><span class="info-value" id="metricsPort">8880</span></div>
+                <div class="info-row"><span class="info-label">Metrics Port</span><span class="info-value" id="metricsPort">8881</span></div>
             </div>
         </div>
 
@@ -752,8 +752,8 @@
          * Copyright (c) 2024-2026 DagTech Ltd / Dawie Nel
          * ============================================ */
 
-        const METRICS_URL   = 'http://127.0.0.1:8880/metrics';
-        const CONTROL_URL   = 'http://127.0.0.1:8880';
+        const METRICS_URL   = 'http://127.0.0.1:8881/metrics';
+        const CONTROL_URL   = 'http://127.0.0.1:8881';
         const POLL_INTERVAL = 5000;
         const MAX_CHART_POINTS = 120;
         const CACHE_KEY = 'dagtech_gpu_last_metrics';
@@ -1260,7 +1260,7 @@
         // ── Config modal ────────────────────────────────────────────
 
         async function openLogs() {
-            try { await fetch('http://127.0.0.1:8880/open-logs'); }
+            try { await fetch('http://127.0.0.1:8881/open-logs'); }
             catch (e) { alert('Could not open log window. Is the control server running?'); }
         }
 

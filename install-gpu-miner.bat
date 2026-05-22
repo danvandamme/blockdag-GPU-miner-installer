@@ -54,10 +54,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-MpPreference -Exclus
 echo [GPU Miner] Defender exclusions set.
 
 REM ============================================================================
-REM 0c. Firewall rule for control server (port 8880)
+REM 0c. Firewall rule for control server (port 8881)
 REM ============================================================================
-echo [GPU Miner] Configuring firewall rule for control server (port 8880)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-NetFirewallRule -DisplayName 'DagTech GPU Miner Control' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName 'DagTech GPU Miner Control' -Direction Inbound -Protocol TCP -LocalPort 8880 -Profile Private,Domain -Action Allow | Out-Null" >nul 2>&1
+echo [GPU Miner] Configuring firewall rule for control server (port 8881)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-NetFirewallRule -DisplayName 'DagTech GPU Miner Control' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName 'DagTech GPU Miner Control' -Direction Inbound -Protocol TCP -LocalPort 8881 -Profile Private,Domain -Action Allow | Out-Null" >nul 2>&1
 echo [GPU Miner] Firewall rule set.
 
 REM ============================================================================
@@ -440,7 +440,7 @@ echo THREADS=!THREADS!
 echo WORKER_NAME=!WORKER!
 echo POOL_PASSWORD=!PASSWORD!
 echo CPU_LIMIT=100
-echo METRICS_PORT=8880
+echo METRICS_PORT=8881
 echo GPU_ENABLED=1
 echo GPU_INTENSITY=!GPU_INT!
 echo GPU_PLATFORM=0
@@ -527,7 +527,7 @@ echo     "DagTech GPU Miner"        - starts mining
 echo     "DagTech GPU Miner - Stop" - stops mining
 echo.
 echo   Dashboard (while mining):
-echo     http://127.0.0.1:8880
+echo     http://127.0.0.1:8881
 echo.
 echo   Config:  %CONFIG_FILE%
 echo   Logs:    %LOG_DIR%

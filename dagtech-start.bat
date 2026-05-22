@@ -14,10 +14,10 @@ if not exist "%BIN%" (
 
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 
-netstat -an 2>nul | find "8880" | find "LISTENING" >nul
+netstat -an 2>nul | find "8881" | find "LISTENING" >nul
 if not errorlevel 1 (
-    echo [DagTech GPU] Already running. Dashboard: http://127.0.0.1:8880/
-    start "" http://127.0.0.1:8880/
+    echo [DagTech GPU] Already running. Dashboard: http://127.0.0.1:8881/
+    start "" http://127.0.0.1:8881/
     exit /b 0
 )
 
@@ -29,8 +29,8 @@ echo.
 start /min "DagTech GPU Miner Control Server" powershell -NoProfile -ExecutionPolicy Bypass -File "%CTRLSCRIPT%" -BaseDir "%BASE%"
 
 timeout /t 2 /nobreak >nul
-echo [DagTech GPU] Dashboard: http://127.0.0.1:8880/
+echo [DagTech GPU] Dashboard: http://127.0.0.1:8881/
 echo [DagTech GPU] Miner is starting in the background...
 echo [DagTech GPU] Logs: %LOGDIR%
 echo.
-start "" http://127.0.0.1:8880/
+start "" http://127.0.0.1:8881/
