@@ -65,7 +65,7 @@ function Build-MinerArgList([hashtable]$cfg) {
     } elseif ($gpuEnabled -eq "0") {
         $argList.Add("--no-gpu")
     }
-    return $argList
+    Write-Output -NoEnumerate $argList
 }
 
 function Start-MinerProcess {
