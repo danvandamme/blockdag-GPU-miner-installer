@@ -563,11 +563,11 @@
                     </div>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">GPU Intensity <span style="color:var(--gpu-primary)">(1 = lowest, 10 = max)</span></label>
+                    <label class="form-label">GPU Intensity <span style="color:var(--gpu-primary)">(0 = lowest, 100 = max)</span></label>
                     <div class="intensity-row">
-                        <input class="intensity-slider" type="range" id="cfgGpuIntensity" min="1" max="10" value="5"
+                        <input class="intensity-slider" type="range" id="cfgGpuIntensity" min="0" max="100" value="80"
                                oninput="document.getElementById('intensityVal').textContent=this.value">
-                        <span class="intensity-label" id="intensityVal">5</span>
+                        <span class="intensity-label" id="intensityVal">80</span>
                     </div>
                 </div>
                 <div class="form-group">
@@ -1325,7 +1325,7 @@
                 document.getElementById('cfgThreads').value     = cfg.THREADS       || '';
                 document.getElementById('cfgCpuLimit').value    = cfg.CPU_LIMIT     || '100';
                 document.getElementById('cfgMetricsPort').value = cfg.METRICS_PORT  || '';
-                const intensity = cfg.GPU_INTENSITY || '5';
+                const intensity = cfg.GPU_INTENSITY || '80';
                 document.getElementById('cfgGpuIntensity').value = intensity;
                 document.getElementById('intensityVal').textContent = intensity;
                 setMode(cfg.MINING_MODE || 'both');

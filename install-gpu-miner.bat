@@ -333,9 +333,51 @@ echo.
 set /p "THREADS_INPUT=  CPU threads (1-%CPU_CORES%, default %DEFAULT_THREADS%): "
 if "%THREADS_INPUT%"=="" (set "THREADS=%DEFAULT_THREADS%") else (set "THREADS=%THREADS_INPUT%")
 
+REM ---- GPU VRAM detection + intensity recommendation -------------------------
 echo.
-set /p "GPU_INT_INPUT=  GPU intensity (0-100, default %DEF_GPU_INT%): "
-if "!GPU_INT_INPUT!"=="" (set "GPU_INT=%DEF_GPU_INT%") else (set "GPU_INT=!GPU_INT_INPUT!")
+echo [GPU Miner] Detecting GPU VRAM for intensity recommendation...
+set "GPU_VRAM_MB=0"
+set "GPU_VRAM_NAME="
+
+REM NVIDIA: nvidia-smi gives exact dedicated VRAM
+for /f "tokens=1,* delims=," %%a in ('nvidia-smi --query-gpu^=name^,memory.total --format^=csv^,noheader^,nounits 2^>nul') do (
+    if "!GPU_VRAM_MB!"=="0" (
+        set "GPU_VRAM_NAME=%%a"
+        set "_V=%%b"
+        set "_V=!_V: =!"
+        set "GPU_VRAM_MB=!_V!"
+    )
+)
+
+REM Fallback: WMI for AMD/Intel (skips iGPUs with <1 GB AdapterRAM)
+if "!GPU_VRAM_MB!"=="0" (
+    for /f "tokens=*" %%v in ('powershell -NoProfile -Command "try { $g=Get-WmiObject Win32_VideoController ^| Where-Object { $_.AdapterRAM -gt 1GB } ^| Sort-Object AdapterRAM -Desc ^| Select-Object -First 1; if($g){ [int]($g.AdapterRAM/1MB) }else{ 0 } } catch { 0 }" 2^>nul') do set "GPU_VRAM_MB=%%v"
+)
+
+REM Map VRAM -> recommended intensity (0-100; each step ~doubles GPU work items: 2^14..2^20)
+set "REC_GPU_INT=60"
+if "!GPU_VRAM_MB!"=="0" goto :vram_fallback
+set "REC_GPU_INT=40"
+if !GPU_VRAM_MB! GEQ 1500  set "REC_GPU_INT=55"
+if !GPU_VRAM_MB! GEQ 2000  set "REC_GPU_INT=65"
+if !GPU_VRAM_MB! GEQ 4000  set "REC_GPU_INT=75"
+if !GPU_VRAM_MB! GEQ 6000  set "REC_GPU_INT=80"
+if !GPU_VRAM_MB! GEQ 8000  set "REC_GPU_INT=85"
+if !GPU_VRAM_MB! GEQ 10000 set "REC_GPU_INT=90"
+if !GPU_VRAM_MB! GEQ 16000 set "REC_GPU_INT=95"
+if not "!GPU_VRAM_NAME!"=="" echo   GPU  : !GPU_VRAM_NAME!
+echo   VRAM : !GPU_VRAM_MB! MB  ^-^>  recommended intensity: !REC_GPU_INT!
+echo   ^(Higher = more GPU work items. Reduce if you see out-of-memory errors.^)
+set "DEF_GPU_INT=!REC_GPU_INT!"
+goto :vram_done
+:vram_fallback
+echo [GPU Miner] Could not detect VRAM. Using default intensity !REC_GPU_INT!.
+set "DEF_GPU_INT=!REC_GPU_INT!"
+:vram_done
+
+echo.
+set /p "GPU_INT_INPUT=  GPU intensity 0-100 (default !DEF_GPU_INT!): "
+if "!GPU_INT_INPUT!"=="" (set "GPU_INT=!DEF_GPU_INT!") else (set "GPU_INT=!GPU_INT_INPUT!")
 
 echo.
 set "DEF_PASSWORD_SHOW="
