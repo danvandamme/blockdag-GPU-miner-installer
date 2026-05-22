@@ -217,6 +217,41 @@ if "%HAS_GCC%"=="1" if not exist "%OPENCL_HEADERS_DIR%\CL\cl.h" (
 )
 
 REM ============================================================================
+REM 2c. Generate libOpenCL.a import library from system OpenCL.dll
+REM     gendef + dlltool are bundled with MinGW-w64. The Khronos headers repo
+REM     only ships .h files — libOpenCL.a must be generated from the system DLL
+REM     that GPU drivers install at C:\Windows\System32\OpenCL.dll.
+REM ============================================================================
+if "%HAS_GCC%"=="1" if not exist "%OPENCL_HEADERS_DIR%\libOpenCL.a" (
+    if exist "%SystemRoot%\System32\OpenCL.dll" (
+        echo [GPU Miner] Generating libOpenCL.a from system OpenCL.dll...
+        set "_GCC_BIN_FOR_OCL="
+        for /f "tokens=*" %%g in ('where gcc 2^>nul') do if not defined _GCC_BIN_FOR_OCL set "_GCC_BIN_FOR_OCL=%%~dpg"
+        if defined _GCC_BIN_FOR_OCL (
+            if exist "!_GCC_BIN_FOR_OCL!gendef.exe" if exist "!_GCC_BIN_FOR_OCL!dlltool.exe" (
+                pushd "%OPENCL_HEADERS_DIR%"
+                "!_GCC_BIN_FOR_OCL!gendef.exe" "%SystemRoot%\System32\OpenCL.dll" >nul 2>&1
+                "!_GCC_BIN_FOR_OCL!dlltool.exe" -d OpenCL.def -l libOpenCL.a >nul 2>&1
+                del /f OpenCL.def 2>nul
+                popd
+                if exist "%OPENCL_HEADERS_DIR%\libOpenCL.a" (
+                    echo [GPU Miner] libOpenCL.a generated successfully.
+                ) else (
+                    echo [GPU Miner] WARNING: libOpenCL.a generation failed. GPU compile may fail.
+                )
+            ) else (
+                echo [GPU Miner] WARNING: gendef/dlltool not found in MinGW bin. GPU compile may fail.
+            )
+        ) else (
+            echo [GPU Miner] WARNING: gcc not found in PATH for libOpenCL.a generation.
+        )
+    ) else (
+        echo [GPU Miner] WARNING: OpenCL.dll not found in System32. Install GPU drivers first.
+        echo         GPU compile will likely fail. Install drivers then re-run installer.
+    )
+)
+
+REM ============================================================================
 REM 3. Locate source files
 REM ============================================================================
 set "SRC_FILE=%~dp0dagtech_miner.c"
@@ -359,7 +394,7 @@ if "%HAS_GCC%"=="1" if exist "%SRC_FILE%" (
     copy /y "%CL_FILE%" "%BIN_DIR%\dagtech_gpu.cl" >nul 2>&1
     echo [GPU Miner] OpenCL kernel installed.
 
-    gcc -DDAGTECH_GPU -I"%OPENCL_HEADERS_DIR%" -O2 -march=native -Wall -D_WIN32_WINNT=0x0600 ^
+    gcc -DDAGTECH_GPU -I"%OPENCL_HEADERS_DIR%" -L"%OPENCL_HEADERS_DIR%" -O2 -march=native -Wall -D_WIN32_WINNT=0x0600 ^
         -o "%BIN_DIR%\dagtech-gpu-miner.exe" ^
         "%SRC_FILE%" ^
         -lws2_32 -lm -lkernel32 -lOpenCL ^

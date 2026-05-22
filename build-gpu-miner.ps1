@@ -73,6 +73,44 @@ if (-not $gcc) {
     if ($found) { $gcc = $found.FullName } else { Write-Host "  ERROR: gcc.exe not found after extraction."; exit 1 }
 }
 
+# -- Step 3b: Generate libOpenCL.a import library from system OpenCL.dll ------
+# gendef + dlltool ship with MinGW-w64. libOpenCL.a is NOT in the Khronos
+# headers repo — it must be generated from the OpenCL.dll that GPU drivers install.
+$oclHeadersDir = Join-Path $here "opencl-headers"
+$libOpenCLPath  = Join-Path $oclHeadersDir "libOpenCL.a"
+if (-not (Test-Path $libOpenCLPath)) {
+    $systemOCL = Join-Path $env:SystemRoot "System32\OpenCL.dll"
+    $gccDir    = Split-Path $gcc
+    $gendef    = Join-Path $gccDir "gendef.exe"
+    $dlltool   = Join-Path $gccDir "dlltool.exe"
+    if (Test-Path $systemOCL) {
+        if ((Test-Path $gendef) -and (Test-Path $dlltool)) {
+            Write-Host "  Generating libOpenCL.a from system OpenCL.dll..."
+            $origLoc = Get-Location
+            Set-Location $oclHeadersDir
+            & $gendef $systemOCL 2>$null | Out-Null
+            & $dlltool -d OpenCL.def -l libOpenCL.a 2>$null | Out-Null
+            Remove-Item (Join-Path $oclHeadersDir "OpenCL.def") -Force -ErrorAction SilentlyContinue
+            Set-Location $origLoc
+            if (Test-Path $libOpenCLPath) {
+                Write-Host "  libOpenCL.a generated successfully."
+            } else {
+                Write-Host "  WARNING: libOpenCL.a generation failed — compile may fail."
+                Write-Host "  Install GPU drivers and retry, or place libOpenCL.a manually in opencl-headers\"
+            }
+        } else {
+            Write-Host "  WARNING: gendef.exe or dlltool.exe not found in MinGW bin: $gccDir"
+            Write-Host "  Cannot generate libOpenCL.a — compile will likely fail with -lOpenCL."
+        }
+    } else {
+        Write-Host "  WARNING: $systemOCL not found."
+        Write-Host "  Install NVIDIA, AMD, or Intel GPU drivers first, then retry."
+    }
+    Write-Host ""
+} else {
+    Write-Host "  libOpenCL.a already present: $libOpenCLPath"
+}
+
 # -- Step 4: Compile -----------------------------------------------------------
 $includeDir = Join-Path $here "opencl-headers"
 
@@ -85,6 +123,7 @@ Write-Host ""
 $compileArgs = @(
     "-DDAGTECH_GPU",
     "-I$includeDir",
+    "-L$includeDir",
     "-O2", "-march=native", "-Wall", "-D_WIN32_WINNT=0x0600",
     "-o", $out, $src,
     "-lws2_32", "-lm", "-lkernel32", "-lOpenCL",
