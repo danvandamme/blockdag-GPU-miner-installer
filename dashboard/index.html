@@ -858,34 +858,38 @@
         }
 
         function setOnline(online, label) {
-            if (online === isConnected) return;
+            const prev = isConnected;
             isConnected = online;
             if (online) {
                 els.statusBadge.className = 'status-badge online';
                 els.statusPulse.className = 'pulse';
                 els.statusText.textContent = 'Mining';
                 document.getElementById('offlineBanner').classList.remove('visible');
-                addLog('Connected to GPU miner', 'share');
+                if (!prev) addLog('Connected to GPU miner', 'share');
             } else {
                 els.statusBadge.className = 'status-badge offline';
                 els.statusPulse.className = 'pulse-off';
                 els.statusText.textContent = label || 'Stopped';
-                showOfflineBanner();
-                addLog(label ? 'Lost connection to miner' : 'Miner stopped', label ? 'error' : '');
+                showOfflineBanner(!label);   // !label → true when deliberately stopped, false when unreachable
+                if (prev) addLog(label ? 'Lost connection to miner' : 'Miner stopped', label ? 'error' : '');
             }
         }
 
-        function showOfflineBanner() {
+        function showOfflineBanner(stopped) {
             const banner = document.getElementById('offlineBanner');
             const since  = document.getElementById('offlineSince');
             banner.classList.add('visible');
-            const cached = getCachedMetrics();
-            if (cached) {
-                const ago = Math.floor((Date.now() - cached.cachedAt) / 1000);
-                const m = Math.floor(ago / 60), s = ago % 60;
-                since.textContent = `showing last known data from ${m > 0 ? m + 'm ' : ''}${s}s ago`;
+            if (stopped) {
+                since.textContent = 'miner process is not running — click Start to resume';
             } else {
-                since.textContent = 'no cached data available';
+                const cached = getCachedMetrics();
+                if (cached) {
+                    const ago = Math.floor((Date.now() - cached.cachedAt) / 1000);
+                    const m = Math.floor(ago / 60), s = ago % 60;
+                    since.textContent = `control server unreachable — last data ${m > 0 ? m + 'm ' : ''}${s}s ago`;
+                } else {
+                    since.textContent = 'control server unreachable';
+                }
             }
         }
 
@@ -1293,19 +1297,31 @@
             try {
                 const resp = await fetch(METRICS_URL, { signal: AbortSignal.timeout(4000) });
                 const data = await resp.json();
-                // data.running is false when the miner process is not running
-                setOnline(data.running !== false);
+                const isRunning = data.running !== false;
+                setOnline(isRunning);
+
+                // When stopped: zero live hashrate so stale log values are not shown
+                if (!isRunning) {
+                    data.hashrate     = 0;
+                    data.cpu_hashrate = 0;
+                    data.gpu_hashrate = 0;
+                }
+
                 setCachedMetrics(data);
                 const prevAccepted = lastAccepted;
                 const prevRejected = lastRejected;
                 applyMetrics(data);
-                if (data.accepted > prevAccepted) {
-                    addLog(`Share accepted! (${data.accepted} total)`, 'share');
-                    lastShareTimestamp = Date.now();
-                    document.getElementById('lastShareTime').textContent = new Date().toLocaleTimeString();
-                    refreshLastShareAge();
+
+                // Only log share events when miner is actually running
+                if (isRunning) {
+                    if (data.accepted > prevAccepted) {
+                        addLog(`Share accepted! (${data.accepted} total)`, 'share');
+                        lastShareTimestamp = Date.now();
+                        document.getElementById('lastShareTime').textContent = new Date().toLocaleTimeString();
+                        refreshLastShareAge();
+                    }
+                    if (data.rejected > prevRejected) addLog(`Share rejected (${data.rejected} total)`, 'error');
                 }
-                if (data.rejected > prevRejected) addLog(`Share rejected (${data.rejected} total)`, 'error');
                 lastRejected = data.rejected;
                 updateEstimate(data.accepted);
                 hashrateHistory.push({ time: Date.now(), total: data.hashrate, cpu: data.cpu_hashrate || 0, gpu: data.gpu_hashrate || 0 });
