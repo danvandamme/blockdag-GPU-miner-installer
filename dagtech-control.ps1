@@ -386,6 +386,8 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
             }
             "/metrics" {
                 $cfg = Read-Config
+                $minerRunning = $null -ne (Get-MinerProcess)
+                $runningStr   = if ($minerRunning) { "true" } else { "false" }
                 $out = @{
                     wallet       = if ($cfg["WALLET"])             { $cfg["WALLET"] }                                   else { "" }
                     worker       = if ($cfg["WORKER_NAME"])        { $cfg["WORKER_NAME"] }                              else { "" }
@@ -445,7 +447,7 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                         }
                     } catch {}
                 }
-                $kvs = @()
+                $kvs = @('"running":' + $runningStr)
                 foreach ($k in $out.Keys) {
                     $v = $out[$k]
                     if ($v -is [string]) { $kvs += ('"' + $k + '":"' + ($v.Replace('\','\\').Replace('"','\"')) + '"') }

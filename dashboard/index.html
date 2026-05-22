@@ -824,7 +824,7 @@
             while (els.logConsole.children.length > 100) els.logConsole.removeChild(els.logConsole.firstChild);
         }
 
-        function setOnline(online) {
+        function setOnline(online, label) {
             if (online === isConnected) return;
             isConnected = online;
             if (online) {
@@ -836,9 +836,9 @@
             } else {
                 els.statusBadge.className = 'status-badge offline';
                 els.statusPulse.className = 'pulse-off';
-                els.statusText.textContent = 'Offline';
+                els.statusText.textContent = label || 'Stopped';
                 showOfflineBanner();
-                addLog('Lost connection to miner', 'error');
+                addLog(label ? 'Lost connection to miner' : 'Miner stopped', label ? 'error' : '');
             }
         }
 
@@ -1260,7 +1260,8 @@
             try {
                 const resp = await fetch(METRICS_URL, { signal: AbortSignal.timeout(4000) });
                 const data = await resp.json();
-                setOnline(true);
+                // data.running is false when the miner process is not running
+                setOnline(data.running !== false);
                 setCachedMetrics(data);
                 const prevAccepted = lastAccepted;
                 const prevRejected = lastRejected;
@@ -1278,7 +1279,7 @@
                 if (hashrateHistory.length > MAX_CHART_POINTS) hashrateHistory = hashrateHistory.slice(-MAX_CHART_POINTS);
                 drawChart();
             } catch (e) {
-                setOnline(false);
+                setOnline(false, 'Offline');
                 const cached = getCachedMetrics();
                 if (cached) applyMetrics(cached);
             }
