@@ -406,14 +406,16 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                     version       = if ($cfg["INSTALLER_VERSION"])  { $cfg["INSTALLER_VERSION"] }                        else { "" }
                     gpu_intensity = if ($cfg["GPU_INTENSITY"])      { [int]$cfg["GPU_INTENSITY"] }                       else { 80 }
                     mining_mode   = $miningMode
-                    job_id        = ""
-                    hashrate      = 0.0
-                    accepted      = 0
-                    submitted     = 0
-                    rejected      = 0
-                    uptime        = 0
-                    total_hashes  = 0
-                    difficulty    = 0.0
+                    job_id           = ""
+                    hashrate         = 0.0
+                    accepted         = 0
+                    submitted        = 0
+                    rejected         = 0
+                    uptime           = 0
+                    total_hashes     = 0
+                    difficulty       = 0.0
+                    cpu_shares_found = 0
+                    gpu_shares_found = 0
                 }
                 $logFile = Join-Path $script:LOGDIR "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
                 if (Test-Path $logFile) {
@@ -423,6 +425,9 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                         $content = $reader.ReadToEnd()
                         $reader.Close(); $fs.Close()
                         $lines = $content -split "`r?`n"
+                        # Full-scan share counts — CPU and GPU have different log prefixes
+                        $out["cpu_shares_found"] = ($lines | Where-Object { $_ -match '\[DagTech\] \*\* SHARE FOUND \*\*' }).Count
+                        $out["gpu_shares_found"] = ($lines | Where-Object { $_ -match '\[DagTech GPU\] \*\* SHARE FOUND \*\*' }).Count
                         $foundStats = $false
                         $foundDiff  = $false
                         $foundJob   = $false
