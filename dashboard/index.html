@@ -1295,9 +1295,23 @@
 
         async function fetchMetrics() {
             try {
-                const resp = await fetch(METRICS_URL, { signal: AbortSignal.timeout(4000) });
-                const data = await resp.json();
-                const isRunning = data.running !== false;
+                // /status has existed since v1 and is the authoritative source for
+                // whether the miner process is actually running. Fetch it in parallel
+                // with /metrics so we never rely on the control server version having
+                // the newer "running" field in the metrics response.
+                const [metricsResp, statusResp] = await Promise.all([
+                    fetch(METRICS_URL, { signal: AbortSignal.timeout(4000) }),
+                    fetch(`${CONTROL_URL}/status`, { signal: AbortSignal.timeout(3000) }).catch(() => null)
+                ]);
+
+                const data = await metricsResp.json();
+
+                // Determine running state from /status first, fall back to data.running
+                let isRunning = data.running !== false;
+                if (statusResp && statusResp.ok) {
+                    try { isRunning = (await statusResp.json()).running === true; } catch {}
+                }
+
                 setOnline(isRunning);
 
                 // When stopped: zero live hashrate so stale log values are not shown
