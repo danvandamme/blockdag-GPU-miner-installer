@@ -11,6 +11,7 @@ $script:DASHBOARD = Join-Path $BaseDir "dashboard\index.html"
 $script:STOPFILE   = Join-Path $BaseDir "logs\.stop"
 $script:MINERPIDF  = Join-Path $BaseDir "logs\miner.pid"
 $PIDFILE           = Join-Path $BaseDir "logs\control.pid"
+$script:TASK_NAME  = "DagTech GPU Miner"
 
 if (-not (Test-Path $script:LOGDIR)) { New-Item -ItemType Directory -Path $script:LOGDIR | Out-Null }
 [System.IO.File]::WriteAllText($PIDFILE, "$PID")
@@ -300,6 +301,70 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
 "@
                 Start-Process powershell -ArgumentList "-NoProfile", "-NoExit", "-Command", $cmd
                 Send-Response $ctx '{"ok":true,"terminal":true}'
+                break
+            }
+            "/switch-mode" {
+                if ($method -ne "POST") { Send-Response $ctx '{"error":"POST required"}' 405; break }
+                $rawBody = ""
+                try {
+                    $ms = New-Object System.IO.MemoryStream
+                    $ctx.Request.InputStream.CopyTo($ms)
+                    $rawBody = [System.Text.Encoding]::UTF8.GetString($ms.ToArray()).Trim()
+                } catch {}
+                $newMode = $null
+                try {
+                    $body = ConvertFrom-Json -InputObject $rawBody
+                    if ($body.mode -eq "login" -or $body.mode -eq "service") { $newMode = $body.mode }
+                } catch {}
+                if (-not $newMode) { Send-Response $ctx '{"error":"invalid mode"}' 400; break }
+
+                # Update START_MODE in config file
+                try {
+                    $lines = @(Get-Content $script:CONFIG)
+                    $found = $false
+                    $newLines = @(foreach ($line in $lines) {
+                        if ($line -match '^START_MODE=') { "START_MODE=$newMode"; $found = $true }
+                        else { $line }
+                    })
+                    if (-not $found) { $newLines += "START_MODE=$newMode" }
+                    [System.IO.File]::WriteAllLines($script:CONFIG, $newLines, (New-Object System.Text.UTF8Encoding $false))
+                    $script:StartMode = $newMode
+                    Write-Log "Start mode updated to '$newMode' in config."
+                } catch {
+                    $msg = $_.Exception.Message -replace '"',"'"
+                    Send-Response $ctx ('{"error":"Config update failed: ' + $msg + '"}') 500
+                    break
+                }
+
+                # Re-register the scheduled task with the new trigger/principal
+                $requiresLogoff = $false
+                $binDir = Split-Path $script:BIN
+                $psArg  = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $binDir 'dagtech-control.ps1') + '"'
+                try {
+                    $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $psArg
+                    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 3650) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+                    if ($newMode -eq "login") {
+                        $interactiveUser = (Get-CimInstance Win32_ComputerSystem).UserName
+                        if (-not $interactiveUser) { throw "Could not determine logged-in user" }
+                        $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $interactiveUser
+                        $principal = New-ScheduledTaskPrincipal -UserId $interactiveUser -LogonType Interactive -RunLevel Highest
+                        $requiresLogoff = $true
+                    } else {
+                        $trigger   = New-ScheduledTaskTrigger -AtStartup
+                        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+                    }
+                    Unregister-ScheduledTask -TaskName $script:TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue
+                    $null = Register-ScheduledTask -TaskName $script:TASK_NAME -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop
+                    Write-Log "Task '$($script:TASK_NAME)' re-registered as '$newMode' mode."
+                } catch {
+                    $msg = $_.Exception.Message -replace '"',"'"
+                    # Config saved — report partial success with warning
+                    $logoffStr = $requiresLogoff.ToString().ToLower()
+                    Send-Response $ctx ('{"ok":true,"mode":"' + $newMode + '","requires_logoff":' + $logoffStr + ',"warn":"Task re-registration failed: ' + $msg + '"}')
+                    break
+                }
+                $logoffStr = $requiresLogoff.ToString().ToLower()
+                Send-Response $ctx ('{"ok":true,"mode":"' + $newMode + '","requires_logoff":' + $logoffStr + '}')
                 break
             }
             "/logs" {
