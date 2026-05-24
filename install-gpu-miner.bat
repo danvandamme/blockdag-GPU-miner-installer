@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0524.4"
+set "VERSION=GPU-2026.0524.5"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -54,10 +54,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-MpPreference -Exclus
 echo [GPU Miner] Defender exclusions set.
 
 REM ============================================================================
-REM 0c. Firewall rule for control server (port 8881)
+REM 0c. Firewall rule for miner metrics (port 8882)
 REM ============================================================================
-echo [GPU Miner] Configuring firewall rule for control server (port 8881)...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-NetFirewallRule -DisplayName 'DagTech GPU Miner Control' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName 'DagTech GPU Miner Control' -Direction Inbound -Protocol TCP -LocalPort 8881 -Profile Private,Domain -Action Allow | Out-Null" >nul 2>&1
+echo [GPU Miner] Configuring firewall rule for miner metrics (port 8882)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-NetFirewallRule -DisplayName 'DagTech GPU Miner Metrics' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName 'DagTech GPU Miner Metrics' -Direction Inbound -Protocol TCP -LocalPort 8882 -Profile Private,Domain -Action Allow | Out-Null" >nul 2>&1
 echo [GPU Miner] Firewall rule set.
 
 REM ============================================================================
@@ -482,13 +482,20 @@ echo THREADS=!THREADS!
 echo WORKER_NAME=!WORKER!
 echo POOL_PASSWORD=!PASSWORD!
 echo CPU_LIMIT=100
-echo METRICS_PORT=8881
+echo METRICS_PORT=8882
 echo GPU_ENABLED=1
 echo GPU_INTENSITY=!GPU_INT!
 echo GPU_PLATFORM=0
 echo GPU_DEVICE=0
 ) > "%CONFIG_FILE%"
 echo [GPU Miner] Config saved.
+
+REM Register HTTP URL ACLs:
+REM   http://+:8882/           - miner metrics (wildcard so it's reachable on LAN)
+REM   http://127.0.0.1:8883/   - control server (localhost only, no wildcard needed)
+netsh http add urlacl url=http://+:8882/ user=Everyone >nul 2>&1
+netsh http add urlacl url=http://127.0.0.1:8883/ user=Everyone >nul 2>&1
+echo [GPU Miner] Port ACLs registered (metrics=8882, control=8883).
 
 REM ============================================================================
 REM 8. Install dashboard
@@ -592,7 +599,7 @@ echo     "DagTech GPU Miner - Stop"      - stops mining
 echo     "DagTech GPU Miner - Uninstall" - removes miner completely
 echo.
 echo   Dashboard (while mining):
-echo     http://127.0.0.1:8881
+echo     http://127.0.0.1:8883
 echo.
 echo   Config:  %CONFIG_FILE%
 echo   Logs:    %LOG_DIR%
