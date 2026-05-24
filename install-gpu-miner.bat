@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0524.1"
+set "VERSION=GPU-2026.0524.2"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -545,16 +545,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Stop"
 
 REM ============================================================================
-REM 12. Auto-start at Windows login (optional)
+REM 12. Auto-start at boot via Task Scheduler (runs as SYSTEM, no login needed)
 REM ============================================================================
 echo.
-set "AUTOSTART=Y"
-set /p "AUTOSTART=  Start DagTech GPU Miner automatically at Windows login? (Y/n): "
-if /i not "%AUTOSTART%"=="n" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$lnk=[IO.Path]::Combine($env:APPDATA,'Microsoft\Windows\Start Menu\Programs\Startup\DagTech GPU Miner.lnk'); $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-start.bat'; $s.WindowStyle=7; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='DagTech GPU Miner auto-start'; $s.Save()"
-    if not errorlevel 1 echo [GPU Miner] Auto-start at login enabled.
-)
+echo   [GPU Miner] Registering auto-start scheduled task (runs at boot as SYSTEM)...
+
+REM Remove old Startup-folder shortcut if present
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$lnk=[IO.Path]::Combine($env:APPDATA,'Microsoft\Windows\Start Menu\Programs\Startup\DagTech GPU Miner.lnk'); ^
+     if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host '[GPU Miner] Removed old startup shortcut.' }" 2>nul
+
+REM Register Task Scheduler task
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$bd='%BIN_DIR%'; ^
+     $arg='-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"' + $bd + '\dagtech-control.ps1\"'; ^
+     $a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg; ^
+     $t=New-ScheduledTaskTrigger -AtStartup; ^
+     $s=New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Days 3650) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1); ^
+     $p=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest; ^
+     Unregister-ScheduledTask -TaskName 'DagTech GPU Miner' -Confirm:$false -ErrorAction SilentlyContinue; ^
+     $null=Register-ScheduledTask -TaskName 'DagTech GPU Miner' -Action $a -Trigger $t -Settings $s -Principal $p -Force; ^
+     Write-Host '[GPU Miner] Scheduled task registered.'"
+if errorlevel 1 echo [GPU Miner] WARNING: Could not register scheduled task - run installer as Administrator.
+
+REM Disable sleep/hibernate so the miner never stops due to power management
+powercfg /change standby-timeout-ac 0 >nul 2>&1
+powercfg /change hibernate-timeout-ac 0 >nul 2>&1
+powercfg /hibernate off >nul 2>&1
+echo   [GPU Miner] Sleep and hibernate disabled.
 
 REM ============================================================================
 REM Done

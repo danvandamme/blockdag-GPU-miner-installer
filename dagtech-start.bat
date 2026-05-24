@@ -26,7 +26,14 @@ echo   DagTech GPU Miner - dagtech.network
 echo   Starting control server...
 echo.
 
-start /min "DagTech GPU Miner Control Server" powershell -NoProfile -ExecutionPolicy Bypass -File "%CTRLSCRIPT%" -BaseDir "%BASE%"
+REM Prefer Task Scheduler (survives reboots without login); fall back to direct launch
+schtasks /query /tn "DagTech GPU Miner" >nul 2>&1
+if not errorlevel 1 (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "Start-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue" >nul 2>&1
+) else (
+    start /min "DagTech GPU Miner Control Server" powershell -NoProfile -ExecutionPolicy Bypass -File "%CTRLSCRIPT%" -BaseDir "%BASE%"
+)
 
 timeout /t 2 /nobreak >nul
 echo [DagTech GPU] Dashboard: http://127.0.0.1:8881/

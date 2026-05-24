@@ -8,6 +8,10 @@ set "PIDFILE=%LOGDIR%\control.pid"
 
 echo. > "%STOPFILE%"
 
+REM Stop the scheduled task first so it doesn't restart the miner
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "Stop-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue" >nul 2>&1
+
 taskkill /f /im dagtech-gpu-miner.exe 2>nul && echo [DagTech GPU] Miner stopped || echo [DagTech GPU] Miner was not running
 
 if exist "%PIDFILE%" (
