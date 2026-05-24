@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0524.9"
+set "VERSION=GPU-2026.0524.10"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -401,7 +401,7 @@ echo   GPU Intensity: %GPU_INT%
 echo.
 
 REM ---- Start mode -----------------------------------------------------------
-set "START_MODE_CHOICE=service"
+set "START_MODE_CHOICE=login"
 if defined DEF_START_MODE set "START_MODE_CHOICE=!DEF_START_MODE!"
 echo   How should the miner start?
 echo     [1] System service  - starts at boot, runs as SYSTEM (no login needed)
