@@ -5,6 +5,6 @@ if errorlevel 1 (
     echo [GPU Miner] STOPPED
 ) else (
     echo [GPU Miner] RUNNING
-    curl -s http://127.0.0.1:8881/metrics 2>nul
+    curl -s http://127.0.0.1:8882/metrics 2>nul
 )
 pause

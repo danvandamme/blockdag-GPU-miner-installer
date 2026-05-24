@@ -14,10 +14,10 @@ if not exist "%BIN%" (
 
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 
-netstat -an 2>nul | find "8881" | find "LISTENING" >nul
+netstat -an 2>nul | find "8883" | find "LISTENING" >nul
 if not errorlevel 1 (
-    echo [DagTech GPU] Already running. Dashboard: http://127.0.0.1:8881/
-    start "" http://127.0.0.1:8881/
+    echo [DagTech GPU] Already running. Dashboard: http://127.0.0.1:8883/
+    start "" http://127.0.0.1:8883/
     exit /b 0
 )
 
@@ -36,8 +36,8 @@ if not errorlevel 1 (
 )
 
 timeout /t 2 /nobreak >nul
-echo [DagTech GPU] Dashboard: http://127.0.0.1:8881/
+echo [DagTech GPU] Dashboard: http://127.0.0.1:8883/
 echo [DagTech GPU] Miner is starting in the background...
 echo [DagTech GPU] Logs: %LOGDIR%
 echo.
-start "" http://127.0.0.1:8881/
+start "" http://127.0.0.1:8883/
