@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0524.3"
+set "VERSION=GPU-2026.0524.4"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -544,6 +544,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner - Stop.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-stop.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Stop DagTech GPU Miner'; $s.Save()"
 if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Stop"
 
+REM -- Uninstall shortcut --
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner - Uninstall.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-uninstall.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Uninstall DagTech GPU Miner'; $s.Save()"
+if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Uninstall"
+
 REM ============================================================================
 REM 12. Auto-start at boot via Task Scheduler (runs as SYSTEM, no login needed)
 REM ============================================================================
@@ -582,8 +587,9 @@ echo     DagTech GPU Miner Installation Complete!
 echo   =====================================================
 echo.
 echo   Desktop shortcuts created:
-echo     "DagTech GPU Miner"        - starts mining
-echo     "DagTech GPU Miner - Stop" - stops mining
+echo     "DagTech GPU Miner"             - starts mining
+echo     "DagTech GPU Miner - Stop"      - stops mining
+echo     "DagTech GPU Miner - Uninstall" - removes miner completely
 echo.
 echo   Dashboard (while mining):
 echo     http://127.0.0.1:8881
