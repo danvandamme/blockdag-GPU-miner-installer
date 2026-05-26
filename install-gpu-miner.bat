@@ -336,7 +336,7 @@ echo.
 set /p "WORKER_INPUT=  Worker name (default: %DEF_WORKER%): "
 if "%WORKER_INPUT%"=="" (set "WORKER=%DEF_WORKER%") else (set "WORKER=%WORKER_INPUT%")
 
-set /a "DEFAULT_THREADS=%CPU_CORES%"
+set /a "DEFAULT_THREADS=%CPU_CORES% / 2"
 if %DEFAULT_THREADS% LSS 1 set "DEFAULT_THREADS=1"
 if defined DEF_THREADS set "DEFAULT_THREADS=%DEF_THREADS%"
 echo.
