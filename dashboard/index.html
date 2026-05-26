@@ -294,6 +294,8 @@
         }
         .log-entry       { color: var(--text-dim); }
         .log-entry.share { color: var(--blue-light); }
+        .log-entry.cpu   { color: hsl(142,72%,50%); }
+        .log-entry.gpu   { color: hsl(270,80%,65%); }
         .log-entry.error { color: #f87171; }
         .log-entry.job   { color: var(--text-secondary); }
 
@@ -1375,10 +1377,10 @@
                         const newCpu = cpuNow - lastCpuSharesFound;
                         const newGpu = gpuNow - lastGpuSharesFound;
                         if (newCpu > 0) {
-                            addLog(`CPU: ${newCpu} share${newCpu > 1 ? 's' : ''} found — submitted to pool (${cpuNow} CPU total)`, 'share');
+                            addLog(`CPU: ${newCpu} share${newCpu > 1 ? 's' : ''} found — submitted to pool (${cpuNow} CPU total)`, 'cpu');
                         }
                         if (newGpu > 0) {
-                            addLog(`GPU: ${newGpu} share${newGpu > 1 ? 's' : ''} found — submitted to pool (${gpuNow} GPU total)`, 'share');
+                            addLog(`GPU: ${newGpu} share${newGpu > 1 ? 's' : ''} found — submitted to pool (${gpuNow} GPU total)`, 'gpu');
                         }
                         lastCpuSharesFound = cpuNow;
                         lastGpuSharesFound = gpuNow;
