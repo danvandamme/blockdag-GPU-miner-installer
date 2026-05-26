@@ -16,6 +16,10 @@
  *   nonce_base- nonce = nonce_base + get_global_id(0)
  */
 
+/* Enable global-memory atomic operations (required by some drivers) */
+#pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics     : enable
+#pragma OPENCL EXTENSION cl_khr_global_int32_extended_atomics : enable
+
 /* =========================================================================
  * Helpers
  * ========================================================================= */
@@ -359,7 +363,7 @@ static void scrypt_romix(__private uint X[32], __global uint *V_slice)
  *   7. Compare hash[7] against 32-bit target
  * ========================================================================= */
 __kernel void dagtech_search(__global const uint *header80,
-                             __global volatile uint *output,
+                             __global uint *output,
                              __global uint *V,
                              uint target,
                              uint nonce_base)
