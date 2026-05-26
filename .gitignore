@@ -19,6 +19,10 @@ mingw-*/
 # Installed instance (separate from installer source)
 C:\dagtech-gpu-miner\
 
+# Dev / internal files — not part of the installer distribution
+git-push.bat
+BUGFIXES-*.md
+
 # Windows
 Thumbs.db
 Desktop.ini
