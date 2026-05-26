@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0525.3"
+set "VERSION=GPU-2026.0525.4"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -288,7 +288,8 @@ echo.
 
 set "DEF_POOL=excalibur.dagtech.network"
 set "DEF_PORT=3334"
-set "DEF_WORKER=dagtech"
+for /f "tokens=*" %%h in ('powershell -nologo -command "$env:COMPUTERNAME.ToLower()" 2^>nul') do set "DEF_WORKER=%%h"
+if "%DEF_WORKER%"=="" set "DEF_WORKER=dagtech"
 set "DEF_THREADS="
 set "DEF_GPU_INT=35"
 if exist "%CONFIG_FILE%" (
