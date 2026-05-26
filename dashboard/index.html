@@ -691,9 +691,10 @@
                 <div class="form-group" style="border-top:1px solid var(--border-color);padding-top:14px;margin-top:6px">
                     <label class="form-label">Start Mode</label>
                     <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;flex:1">
+                        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;flex:1">
                             <button class="mode-btn" id="smService" onclick="setStartMode('service')">&#9881; System Service</button>
                             <button class="mode-btn" id="smLogin"   onclick="setStartMode('login')">&#128100; At Login</button>
+                            <button class="mode-btn" id="smManual"  onclick="setStartMode('manual')">&#128070; Manual Only</button>
                         </div>
                         <button class="btn-modal-cancel" id="btnSwitchMode" onclick="switchMode()" style="white-space:nowrap;flex-shrink:0">Apply</button>
                     </div>
@@ -1601,10 +1602,14 @@
             pendingStartMode = mode;
             document.getElementById('smService').classList.toggle('active', mode === 'service');
             document.getElementById('smLogin').classList.toggle('active', mode === 'login');
+            document.getElementById('smManual').classList.toggle('active', mode === 'manual');
             const hint = document.getElementById('startModeHint');
             if (mode === 'login') {
                 hint.textContent = 'Miner starts when you log in. Logs button opens a terminal window.';
                 hint.style.color = 'hsl(45,100%,60%)';
+            } else if (mode === 'manual') {
+                hint.textContent = 'Miner will not start automatically. Use the Start button or desktop shortcut whenever you want to mine.';
+                hint.style.color = 'hsl(210,80%,65%)';
             } else {
                 hint.textContent = 'Miner starts at boot as a system service. Logs viewed via inline modal.';
                 hint.style.color = 'var(--text-dim)';
@@ -1629,6 +1634,9 @@
                     if (data.warn) {
                         hint.style.color = 'hsl(45,100%,60%)';
                         hint.textContent = '⚠ Config saved but task re-registration failed: ' + data.warn;
+                    } else if (data.mode === 'manual') {
+                        hint.style.color = 'hsl(142,72%,50%)';
+                        hint.textContent = '✓ Switched to Manual mode. Miner will not start automatically.';
                     } else if (data.requires_logoff) {
                         hint.style.color = 'hsl(142,72%,50%)';
                         hint.textContent = '✓ Switched to Login mode. Log off and back in to activate.';

@@ -408,7 +408,7 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                 $newMode = $null
                 try {
                     $body = ConvertFrom-Json -InputObject $rawBody
-                    if ($body.mode -eq "login" -or $body.mode -eq "service") { $newMode = $body.mode }
+                    if ($body.mode -eq "login" -or $body.mode -eq "service" -or $body.mode -eq "manual") { $newMode = $body.mode }
                 } catch {}
                 if (-not $newMode) { Send-Response $ctx '{"error":"invalid mode"}' 400; break }
 
@@ -427,6 +427,17 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                 } catch {
                     $msg = $_.Exception.Message -replace '"',"'"
                     Send-Response $ctx ('{"error":"Config update failed: ' + $msg + '"}') 500
+                    break
+                }
+
+                # Manual mode: remove any existing task and write the stop sentinel.
+                # The miner stays idle until the user explicitly clicks Start.
+                if ($newMode -eq "manual") {
+                    Unregister-ScheduledTask -TaskName $script:TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue
+                    if (-not (Test-Path $script:LOGDIR)) { New-Item -ItemType Directory -Path $script:LOGDIR -Force | Out-Null }
+                    [System.IO.File]::WriteAllText($script:STOPFILE, "")
+                    Write-Log "Switched to manual mode: scheduled task removed, stop sentinel written."
+                    Send-Response $ctx '{"ok":true,"mode":"manual","requires_logoff":false}'
                     break
                 }
 
