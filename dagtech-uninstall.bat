@@ -65,7 +65,7 @@ echo   [Uninstall] Processes stopped.
 
 REM 4. Remove desktop shortcuts
 echo   [Uninstall] Removing desktop shortcuts...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); 'DagTech GPU Miner.lnk','DagTech GPU Miner - Stop.lnk','DagTech GPU Miner - Uninstall.lnk','DagTech GPU Miner - Logs.lnk' | ForEach-Object { $f=Join-Path $d $_; if (Test-Path $f) { Remove-Item $f -Force } }" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); 'DagTech GPU Miner.lnk','DagTech GPU Miner - Stop.lnk','DagTech GPU Miner - Uninstall.lnk','DagTech GPU Miner - Logs.lnk','DagTech GPU Miner - Restart Control.lnk' | ForEach-Object { $f=Join-Path $d $_; if (Test-Path $f) { Remove-Item $f -Force } }" 2>nul
 
 REM 5. Remove legacy Startup-folder shortcut (old installs)
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$lnk=[IO.Path]::Combine($env:APPDATA,'Microsoft\Windows\Start Menu\Programs\Startup\DagTech GPU Miner.lnk'); if (Test-Path $lnk) { Remove-Item $lnk -Force }" 2>nul

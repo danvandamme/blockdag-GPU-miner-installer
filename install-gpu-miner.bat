@@ -573,7 +573,7 @@ REM ============================================================================
 REM 9. Install launcher scripts
 REM ============================================================================
 echo [GPU Miner] Installing launcher scripts...
-for %%f in (dagtech-start.bat dagtech-stop.bat dagtech-status.bat dagtech-logs.bat dagtech-force-stop.bat) do (
+for %%f in (dagtech-start.bat dagtech-stop.bat dagtech-status.bat dagtech-logs.bat dagtech-force-stop.bat dagtech-restart-control.bat) do (
     if exist "%~dp0%%f" (
         copy /y "%~dp0%%f" "%BIN_DIR%\%%f" >nul
     )
@@ -611,6 +611,11 @@ REM -- Logs shortcut --
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner - Logs.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-logs.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='View DagTech GPU Miner live log'; $s.Save()"
 if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Logs"
+
+REM -- Restart Control Server shortcut --
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner - Restart Control.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-restart-control.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Restart DagTech GPU Miner control server (use after updates)'; $s.Save()"
+if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Restart Control"
 
 REM ============================================================================
 REM 12. Auto-start via Task Scheduler
