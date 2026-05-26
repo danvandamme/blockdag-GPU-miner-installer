@@ -258,6 +258,7 @@ while ($listener.IsListening) {
         switch -exact ($path) {
             "/" {
                 $html = [System.IO.File]::ReadAllText($script:DASHBOARD, [System.Text.Encoding]::UTF8)
+                $ctx.Response.Headers["Cache-Control"] = "no-store"
                 Send-Response $ctx $html 200 "text/html; charset=utf-8"
                 break
             }
