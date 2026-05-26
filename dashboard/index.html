@@ -800,7 +800,7 @@
                     </div>
                     <div>
                         <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">GPU</div>
-                        <div class="stat-value purple" id="gpuHashrateVal" style="font-size:18px;">-- <span class="stat-unit">H/s</span></div>
+                        <div class="stat-value green" id="gpuHashrateVal" style="font-size:18px;">-- <span class="stat-unit">H/s</span></div>
                     </div>
                 </div>
             </div>
@@ -814,7 +814,7 @@
                     </div>
                     <div>
                         <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;">GPU</div>
-                        <div class="stat-value purple" id="gpuSharesAccepted" style="font-size:18px;">--</div>
+                        <div class="stat-value green" id="gpuSharesAccepted" style="font-size:18px;">--</div>
                         <div id="gpuSharesSub" style="font-size:11px;color:var(--text-dim);margin-top:2px;">-- submitted</div>
                     </div>
                 </div>
@@ -1279,19 +1279,19 @@
                 }
             }
 
-            // Total (purple, filled area behind others)
-            drawSeries('total', 'hsl(270, 80%, 65%)', 2, true);
+            // Total (blue, filled area behind others)
+            drawSeries('total', 'hsl(210, 80%, 65%)', 2, true);
 
             if (hasGpu) {
-                // CPU (blue) and GPU (teal) as thinner lines on top
-                drawSeries('cpu', 'hsl(210, 80%, 65%)', 1.5, false);
-                drawSeries('gpu', 'hsl(160, 75%, 55%)', 1.5, false);
+                // CPU (green) and GPU (purple) as thinner lines on top
+                drawSeries('cpu', 'hsl(142, 72%, 50%)', 1.5, false);
+                drawSeries('gpu', 'hsl(270, 80%, 65%)', 1.5, false);
 
                 // Legend
                 const legend = [
-                    { label: 'Total', color: 'hsl(270, 80%, 65%)' },
-                    { label: 'CPU',   color: 'hsl(210, 80%, 65%)' },
-                    { label: 'GPU',   color: 'hsl(160, 75%, 55%)' }
+                    { label: 'Total', color: 'hsl(210, 80%, 65%)' },
+                    { label: 'CPU',   color: 'hsl(142, 72%, 50%)' },
+                    { label: 'GPU',   color: 'hsl(270, 80%, 65%)' }
                 ];
                 ctx.font = '11px Inter, sans-serif';
                 let lx = padding.left;
@@ -1732,6 +1732,7 @@
                 con.innerHTML = lines.map(line => {
                     const esc = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
                     if (/SHARE FOUND/i.test(line))                         return `<span style="color:hsl(142,72%,55%)">${esc}</span>`;
+                    if (/\[DagTech GPU\]/.test(line))                      return `<span style="color:hsl(270,80%,65%)">${esc}</span>`;
                     if (/ERROR|error|failed|FAILED/i.test(line))           return `<span style="color:#f87171">${esc}</span>`;
                     if (/WARN|warn/i.test(line))                           return `<span style="color:hsl(45,100%,60%)">${esc}</span>`;
                     if (/Starting miner|Control server|Watchdog/i.test(line)) return `<span style="color:var(--blue-light)">${esc}</span>`;
