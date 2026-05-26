@@ -23,10 +23,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$log = Join-Path $logDir ('miner_' + (Get-Date -Format 'yyyy-MM-dd') + '.log');" ^
     "while (-not (Test-Path $log)) { Write-Host 'Waiting for log file...' -ForegroundColor DarkGray; Start-Sleep 2 };" ^
     "Get-Content -Wait -Tail 60 $log | ForEach-Object {" ^
-    "    if ($_ -match 'SHARE FOUND')            { Write-Host $_ -ForegroundColor Green }" ^
-    "    elseif ($_ -match '\[DagTech GPU\]')     { Write-Host $_ -ForegroundColor Magenta }" ^
-    "    elseif ($_ -match '\[DagTech CPU\]')     { Write-Host $_ -ForegroundColor Green }" ^
-    "    elseif ($_ -match 'ERROR|failed|FAILED') { Write-Host $_ -ForegroundColor Red }" ^
-    "    elseif ($_ -match 'WARN|warn')           { Write-Host $_ -ForegroundColor Yellow }" ^
+    "    if ($_ -match 'SHARE FOUND')                 { Write-Host $_ -ForegroundColor Green }" ^
+    "    elseif ($_.Contains('[DagTech GPU]'))         { Write-Host $_ -ForegroundColor Magenta }" ^
+    "    elseif ($_.Contains('[DagTech CPU]'))         { Write-Host $_ -ForegroundColor Green }" ^
+    "    elseif ($_ -match 'ERROR|failed|FAILED')      { Write-Host $_ -ForegroundColor Red }" ^
+    "    elseif ($_ -match 'WARN|warn')                { Write-Host $_ -ForegroundColor Yellow }" ^
     "    elseif ($_ -match 'Control server|Watchdog|Starting') { Write-Host $_ -ForegroundColor Cyan }" ^
     "    else { Write-Host $_ -ForegroundColor Gray } }"
