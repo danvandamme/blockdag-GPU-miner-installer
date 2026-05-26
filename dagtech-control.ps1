@@ -77,6 +77,62 @@ function Read-Config {
     return $cfg
 }
 
+function Detect-GpuVram {
+    # Returns @{ vram_mb = <int>; rec_intensity = <int> }
+    # Reads from config cache if already stored; otherwise detects and writes back.
+    $cfg = Read-Config
+    if ($cfg["GPU_REC_INTENSITY"] -and $cfg["GPU_VRAM_MB"] -ne $null) {
+        return @{ vram_mb = [int]$cfg["GPU_VRAM_MB"]; rec_intensity = [int]$cfg["GPU_REC_INTENSITY"] }
+    }
+
+    $vramMb = 0
+
+    # Try nvidia-smi first (exact dedicated VRAM)
+    try {
+        $nvOut = & nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null
+        if ($nvOut -match '^\d+') { $vramMb = [int]($nvOut.Trim().Split("`n")[0].Trim()) }
+    } catch {}
+
+    # Fall back to WMI for AMD/Intel (skips iGPUs < 1 GB)
+    if ($vramMb -eq 0) {
+        try {
+            $gpu = Get-WmiObject Win32_VideoController |
+                   Where-Object { $_.AdapterRAM -gt 1073741824 } |
+                   Sort-Object AdapterRAM -Descending |
+                   Select-Object -First 1
+            if ($gpu) { $vramMb = [int]($gpu.AdapterRAM / 1MB) }
+        } catch {}
+    }
+
+    # Compute recommended intensity from V-buffer formula (75% of VRAM target)
+    # V-buffer bytes = 2^E * 128 KB  (E = 14 + intensity/100*6)
+    $recInt = 10  # safe fallback when VRAM unknown
+    if ($vramMb -gt 0) {
+        $target = [double]$vramMb * 1048576.0 * 0.75
+        $e = [Math]::Floor([Math]::Log($target / 131072.0) / [Math]::Log(2.0))
+        if ($e -lt 14) { $e = 14 }
+        $recInt = [int][Math]::Floor(($e - 13.5) * 100.0 / 6.0 - 0.001)
+        if ($recInt -lt 5)  { $recInt = 5 }
+        if ($recInt -gt 95) { $recInt = 95 }
+    }
+
+    # Cache to config.env so subsequent reads are instant
+    try {
+        $lines   = @(Get-Content $script:CONFIG)
+        $hadVram = $false; $hadRec = $false
+        $newLines = @(foreach ($line in $lines) {
+            if ($line -match '^GPU_VRAM_MB=')      { "GPU_VRAM_MB=$vramMb";  $hadVram = $true }
+            elseif ($line -match '^GPU_REC_INTENSITY=') { "GPU_REC_INTENSITY=$recInt"; $hadRec  = $true }
+            else { $line }
+        })
+        if (-not $hadVram) { $newLines += "GPU_VRAM_MB=$vramMb" }
+        if (-not $hadRec)  { $newLines += "GPU_REC_INTENSITY=$recInt" }
+        [System.IO.File]::WriteAllLines($script:CONFIG, $newLines, (New-Object System.Text.UTF8Encoding $false))
+    } catch {}
+
+    return @{ vram_mb = $vramMb; rec_intensity = $recInt }
+}
+
 function Get-MinerProcess {
     # Try saved PID first — reliable even if the name lookup fails
     if (Test-Path $script:MINERPIDF) {
@@ -170,6 +226,9 @@ function Send-Response {
 
 # Watchdog — checked inline on the main thread after each request (no threading issues)
 $script:LastWatchdog = [datetime]::UtcNow
+
+# Detect GPU VRAM and cache recommended intensity to config (runs once; no-op if already cached)
+$null = Detect-GpuVram
 
 # Start listener
 $listener = New-Object System.Net.HttpListener
@@ -296,13 +355,15 @@ while ($listener.IsListening) {
             }
             "/gpu-stats" {
                 $cfg = Read-Config
-                $gpuEnabled  = if ($cfg["GPU_ENABLED"])   { $cfg["GPU_ENABLED"] -eq "1" } else { $false }
-                $gpuIntensity= if ($cfg["GPU_INTENSITY"]) { [int]$cfg["GPU_INTENSITY"] }  else { 80 }
-                $gpuThrottle = if ($cfg["GPU_THROTTLE"])  { [int]$cfg["GPU_THROTTLE"] }   else { 100 }
-                $gpuPlatform = if ($cfg["GPU_PLATFORM"])  { [int]$cfg["GPU_PLATFORM"] }   else { 0 }
-                $gpuDevice   = if ($cfg["GPU_DEVICE"])    { [int]$cfg["GPU_DEVICE"] }     else { 0 }
+                $gpuEnabled  = if ($cfg["GPU_ENABLED"])      { $cfg["GPU_ENABLED"] -eq "1" }  else { $false }
+                $gpuIntensity= if ($cfg["GPU_INTENSITY"])    { [int]$cfg["GPU_INTENSITY"] }   else { 80 }
+                $gpuThrottle = if ($cfg["GPU_THROTTLE"])     { [int]$cfg["GPU_THROTTLE"] }    else { 100 }
+                $gpuPlatform = if ($cfg["GPU_PLATFORM"])     { [int]$cfg["GPU_PLATFORM"] }    else { 0 }
+                $gpuDevice   = if ($cfg["GPU_DEVICE"])       { [int]$cfg["GPU_DEVICE"] }      else { 0 }
+                $gpuVramMb   = if ($cfg["GPU_VRAM_MB"])      { [int]$cfg["GPU_VRAM_MB"] }     else { 0 }
+                $gpuRecInt   = if ($cfg["GPU_REC_INTENSITY"]){ [int]$cfg["GPU_REC_INTENSITY"]}else { -1 }
                 $enabledStr  = if ($gpuEnabled) { "true" } else { "false" }
-                Send-Response $ctx ('{"gpu_enabled":' + $enabledStr + ',"gpu_intensity":' + $gpuIntensity + ',"gpu_throttle":' + $gpuThrottle + ',"gpu_platform":' + $gpuPlatform + ',"gpu_device":' + $gpuDevice + '}')
+                Send-Response $ctx ('{"gpu_enabled":' + $enabledStr + ',"gpu_intensity":' + $gpuIntensity + ',"gpu_throttle":' + $gpuThrottle + ',"gpu_platform":' + $gpuPlatform + ',"gpu_device":' + $gpuDevice + ',"gpu_vram_mb":' + $gpuVramMb + ',"gpu_rec_intensity":' + $gpuRecInt + '}')
                 break
             }
             "/open-logs" {

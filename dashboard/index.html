@@ -610,8 +610,8 @@
                     <div class="intensity-row">
                         <input class="intensity-slider" type="range" id="cfgGpuIntensity" min="0" max="100" value="80"
                                list="intensityTicks"
-                               oninput="document.getElementById('intensityVal').textContent=this.value; document.getElementById('intensityRecBadge').style.display=(this.value==='80'?'inline':'none'); updateIntensityHint(this.value)">
-                        <datalist id="intensityTicks"><option value="80"></datalist>
+                               oninput="document.getElementById('intensityVal').textContent=this.value; document.getElementById('intensityRecBadge').style.display=(gpuRecIntensity>=0&&parseInt(this.value)===gpuRecIntensity?'inline':'none'); updateIntensityHint(parseInt(this.value))">
+                        <datalist id="intensityTicks"><option value="80" id="intensityTickRec"></datalist>
                         <span class="intensity-label" id="intensityVal">80</span>
                         <span id="intensityRecBadge" style="font-size:10px;color:hsl(142,72%,55%);font-weight:700;white-space:nowrap;padding:2px 5px;border-radius:4px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);">&#10003; Rec</span>
                     </div>
@@ -910,6 +910,9 @@
         const METRICS_URL   = 'http://127.0.0.1:8883/metrics';
         const CONTROL_URL   = 'http://127.0.0.1:8883';
         const POLL_INTERVAL = 5000;
+        // Per-GPU VRAM recommendation (populated from config when modal opens)
+        let gpuRecIntensity = -1;   // -1 = unknown / not stored yet
+        let gpuVramMb       = 0;
         const MAX_CHART_POINTS = 120;
         const CACHE_KEY = 'dagtech_gpu_last_metrics';
 
@@ -1676,9 +1679,14 @@
                 desc   = 'Full GPU load — highest possible hashrate, maximum heat and power draw.';
                 rec    = 'Only for 6 GB+ GPUs with good cooling. May cause instability on mid-range cards.';
             }
-            const recRow = (val === 80)
-                ? `<span style="display:inline-block;margin-top:5px;padding:3px 8px;border-radius:4px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.4);color:hsl(142,72%,55%);font-weight:700;font-size:11px;">&#10003; Recommended default</span><br>`
-                : '';
+            // Per-GPU recommendation row
+            let recRow = '';
+            if (gpuRecIntensity >= 0 && val === gpuRecIntensity) {
+                const vramLabel = gpuVramMb > 0 ? ` (${gpuVramMb} MB VRAM)` : ' (VRAM unknown)';
+                recRow = `<span style="display:inline-block;margin-top:5px;padding:3px 8px;border-radius:4px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.4);color:hsl(142,72%,55%);font-weight:700;font-size:11px;">&#10003; Recommended for your GPU${vramLabel}</span><br>`;
+            } else if (gpuRecIntensity >= 0) {
+                recRow = `<span style="color:var(--text-dim);font-size:10px;">Your GPU&#39;s recommended setting: ${gpuRecIntensity}${gpuVramMb > 0 ? ' ('+gpuVramMb+' MB VRAM)' : ''}</span><br>`;
+            }
             el.innerHTML =
                 `<span style="color:${color};font-weight:600;">${badge}</span>` +
                 `<span style="color:var(--text-dim);margin-left:8px;">&#128190; ${vram}</span><br>` +
@@ -1754,11 +1762,18 @@
                 document.getElementById('cfgCpuLimit').value    = cfg.CPU_LIMIT     || '100';
                 document.getElementById('cfgMetricsPort').value = cfg.METRICS_PORT  || '8882';
                 document.getElementById('cfgDashPort').value    = '8883';
+                gpuRecIntensity = cfg.GPU_REC_INTENSITY ? parseInt(cfg.GPU_REC_INTENSITY) : -1;
+                gpuVramMb       = cfg.GPU_VRAM_MB      ? parseInt(cfg.GPU_VRAM_MB)       : 0;
+                // Move the datalist tick mark to the per-GPU recommended position
+                const tickEl = document.getElementById('intensityTickRec');
+                if (tickEl) tickEl.value = gpuRecIntensity >= 0 ? gpuRecIntensity : 80;
                 const intensity = cfg.GPU_INTENSITY || '80';
                 document.getElementById('cfgGpuIntensity').value = intensity;
                 document.getElementById('intensityVal').textContent = intensity;
-                document.getElementById('intensityRecBadge').style.display = (intensity === '80' ? 'inline' : 'none');
-                updateIntensityHint(parseInt(intensity));
+                const iVal = parseInt(intensity);
+                document.getElementById('intensityRecBadge').style.display =
+                    (gpuRecIntensity >= 0 && iVal === gpuRecIntensity) ? 'inline' : 'none';
+                updateIntensityHint(iVal);
                 const throttle = cfg.GPU_THROTTLE || '100';
                 document.getElementById('cfgGpuThrottle').value = throttle;
                 document.getElementById('throttleVal').textContent = throttle + '%';
