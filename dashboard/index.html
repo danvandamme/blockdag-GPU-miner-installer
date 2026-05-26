@@ -436,9 +436,23 @@
             padding: 28px 32px 24px;
             width: 100%;
             max-width: 520px;
+            max-height: calc(100vh - 40px);
+            display: flex;
+            flex-direction: column;
             box-shadow: 0 24px 64px rgba(0,0,0,0.6);
         }
-        .modal-title { font-size: 17px; font-weight: 600; margin-bottom: 22px; color: var(--text-primary); }
+        .modal-body {
+            overflow-y: auto;
+            flex: 1;
+            /* Extend scroll area to modal edges so the scrollbar sits flush */
+            margin-right: -18px;
+            padding-right: 14px;
+        }
+        .modal-body::-webkit-scrollbar { width: 4px; }
+        .modal-body::-webkit-scrollbar-track { background: transparent; }
+        .modal-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 2px; }
+        .modal-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+        .modal-title { font-size: 17px; font-weight: 600; margin-bottom: 22px; color: var(--text-primary); flex-shrink: 0; }
         .form-group { margin-bottom: 14px; }
         .form-label {
             display: block;
@@ -487,7 +501,7 @@
             color: var(--gpu-primary);
         }
 
-        .modal-footer { display: flex; align-items: center; gap: 10px; margin-top: 22px; }
+        .modal-footer { display: flex; align-items: center; gap: 10px; margin-top: 22px; flex-shrink: 0; }
         .modal-status { flex: 1; font-size: 13px; color: var(--text-secondary); min-height: 18px; }
         .btn-modal-cancel {
             padding: 8px 18px; border-radius: 8px; border: 1px solid var(--border-color);
@@ -571,6 +585,7 @@
         <div class="modal-overlay" id="configModal" onclick="if(event.target===this)closeConfig()">
             <div class="modal">
                 <div class="modal-title">&#9881; GPU Miner Configuration</div>
+                <div class="modal-body">
                 <div class="form-group">
                     <label class="form-label">Wallet Address</label>
                     <input class="form-input" id="cfgWallet" type="text" placeholder="your_wallet_address" spellcheck="false" autocomplete="off">
@@ -658,6 +673,7 @@
                     </div>
                     <div id="startModeHint" style="margin-top:8px;font-size:12px;color:var(--text-dim);line-height:1.5;min-height:16px"></div>
                 </div>
+                </div><!-- /.modal-body -->
                 <div class="modal-footer">
                     <div class="modal-status" id="configStatus"></div>
                     <button class="btn-modal-cancel" onclick="closeConfig()">Cancel</button>
