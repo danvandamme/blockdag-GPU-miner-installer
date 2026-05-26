@@ -609,8 +609,11 @@
                     <label class="form-label">VRAM / Work Size <span style="font-size:10px;opacity:0.55;font-weight:400;">(GPU_INTENSITY)</span></label>
                     <div class="intensity-row">
                         <input class="intensity-slider" type="range" id="cfgGpuIntensity" min="0" max="100" value="80"
-                               oninput="document.getElementById('intensityVal').textContent=this.value; updateIntensityHint(this.value)">
+                               list="intensityTicks"
+                               oninput="document.getElementById('intensityVal').textContent=this.value; document.getElementById('intensityRecBadge').style.display=(this.value==='80'?'inline':'none'); updateIntensityHint(this.value)">
+                        <datalist id="intensityTicks"><option value="80"></datalist>
                         <span class="intensity-label" id="intensityVal">80</span>
+                        <span id="intensityRecBadge" style="font-size:10px;color:hsl(142,72%,55%);font-weight:700;white-space:nowrap;padding:2px 5px;border-radius:4px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3);">&#10003; Rec</span>
                     </div>
                     <div id="intensityHint" style="margin-top:7px;font-size:11px;line-height:1.5;padding:7px 10px;border-radius:6px;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.05);"></div>
                 </div>
@@ -1665,7 +1668,7 @@
                 badge  = '&#9679; Performance';
                 vram   = '~3–4 GB VRAM';
                 desc   = 'High GPU load — near-maximum hashrate. Monitor temperatures.';
-                rec    = 'Recommended default (80). Requires a 4 GB+ GPU. Reduce if you see crashes or GPU errors in logs.';
+                rec    = 'Requires a 4 GB+ GPU. Reduce if you see crashes or GPU errors in logs.';
             } else {
                 color  = '#f87171';
                 badge  = '&#9679; Maximum';
@@ -1673,9 +1676,13 @@
                 desc   = 'Full GPU load — highest possible hashrate, maximum heat and power draw.';
                 rec    = 'Only for 6 GB+ GPUs with good cooling. May cause instability on mid-range cards.';
             }
+            const recRow = (val === 80)
+                ? `<span style="display:inline-block;margin-top:5px;padding:3px 8px;border-radius:4px;background:rgba(34,197,94,0.15);border:1px solid rgba(34,197,94,0.4);color:hsl(142,72%,55%);font-weight:700;font-size:11px;">&#10003; Recommended default</span><br>`
+                : '';
             el.innerHTML =
                 `<span style="color:${color};font-weight:600;">${badge}</span>` +
                 `<span style="color:var(--text-dim);margin-left:8px;">&#128190; ${vram}</span><br>` +
+                recRow +
                 `<span style="color:var(--text-secondary);">${desc}</span><br>` +
                 `<span style="color:var(--text-dim);">${rec}</span>`;
         }
@@ -1750,7 +1757,8 @@
                 const intensity = cfg.GPU_INTENSITY || '80';
                 document.getElementById('cfgGpuIntensity').value = intensity;
                 document.getElementById('intensityVal').textContent = intensity;
-                updateIntensityHint(intensity);
+                document.getElementById('intensityRecBadge').style.display = (intensity === '80' ? 'inline' : 'none');
+                updateIntensityHint(parseInt(intensity));
                 const throttle = cfg.GPU_THROTTLE || '100';
                 document.getElementById('cfgGpuThrottle').value = throttle;
                 document.getElementById('throttleVal').textContent = throttle + '%';
