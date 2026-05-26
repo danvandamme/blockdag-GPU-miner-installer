@@ -149,8 +149,6 @@
             margin-bottom: 12px;
         }
         .stats-row:last-of-type { margin-bottom: 24px; }
-        .stats-row-6 { grid-template-columns: repeat(6, 1fr); }
-        .stats-row-4 { grid-template-columns: repeat(4, 1fr); }
         .stats-row-5 { grid-template-columns: repeat(5, 1fr); }
 
         .stat-card {
@@ -343,12 +341,10 @@
         .footer a { color: var(--blue-primary); text-decoration: none; }
 
         /* Responsive */
-        @media (max-width: 1100px) {
-            .stats-row-6, .stats-row-4, .stats-row-5 { grid-template-columns: repeat(3, 1fr); }
-        }
+        @media (max-width: 1100px) { .stats-row-5 { grid-template-columns: repeat(3, 1fr); } }
         @media (max-width: 768px) {
             .container { padding: 16px; }
-            .stats-row-6, .stats-row-4, .stats-row-5 { grid-template-columns: repeat(2, 1fr); }
+            .stats-row-5 { grid-template-columns: repeat(2, 1fr); }
             .stat-value { font-size: 20px; }
             .header { flex-direction: column; gap: 12px; }
         }
@@ -764,16 +760,8 @@
 
         <!-- Main Stats -->
 
-        <!-- Top row: Node Connection · Hash Rate · Submitted · Accepted · Rejected · Stale -->
-        <div class="stats-row stats-row-6">
-            <div class="stat-card">
-                <div class="stat-label">Node Connection</div>
-                <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
-                    <div class="pool-dot" id="poolConnDot"></div>
-                    <div class="stat-value" id="poolConnStatus" style="font-size:18px;color:var(--text-dim);">--</div>
-                </div>
-                <div class="stat-sub" id="poolConnSub"></div>
-            </div>
+        <!-- Top row: Hash Rate · Submitted · Accepted · Rejected · Stale -->
+        <div class="stats-row stats-row-5">
             <div class="stat-card">
                 <div class="stat-label">Total Hash Rate</div>
                 <div class="stat-value blue" id="hashrate">0.0 <span class="stat-unit">H/s</span></div>
@@ -801,8 +789,8 @@
             </div>
         </div>
 
-        <!-- Middle row: Uptime · CPU/GPU Hash Rate · CPU/GPU Shares · Last Share -->
-        <div class="stats-row stats-row-4">
+        <!-- Middle row: Uptime · CPU/GPU Hash Rate · CPU/GPU Shares · Last Share · Node Connection -->
+        <div class="stats-row stats-row-5">
             <div class="stat-card">
                 <div class="stat-label">Uptime</div>
                 <div class="stat-value" id="uptime">0:00</div>
@@ -840,6 +828,14 @@
                 <div class="stat-label">Last Share</div>
                 <div class="stat-value" id="lastShareAge">--</div>
                 <div class="stat-sub" id="lastShareTime">No share yet</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Node Connection</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+                    <div class="pool-dot" id="poolConnDot"></div>
+                    <div class="stat-value" id="poolConnStatus" style="font-size:18px;color:var(--text-dim);">--</div>
+                </div>
+                <div class="stat-sub" id="poolConnSub"></div>
             </div>
         </div>
 
