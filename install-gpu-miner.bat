@@ -570,7 +570,7 @@ REM ============================================================================
 REM 9. Install launcher scripts
 REM ============================================================================
 echo [GPU Miner] Installing launcher scripts...
-for %%f in (dagtech-start.bat dagtech-stop.bat dagtech-status.bat dagtech-logs.bat) do (
+for %%f in (dagtech-start.bat dagtech-stop.bat dagtech-status.bat dagtech-logs.bat dagtech-force-stop.bat) do (
     if exist "%~dp0%%f" (
         copy /y "%~dp0%%f" "%BIN_DIR%\%%f" >nul
     )
