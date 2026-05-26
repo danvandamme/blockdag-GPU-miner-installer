@@ -286,11 +286,21 @@
         .earnings-rate-input:focus { border-color: var(--blue-primary); }
 
         /* Info Grid */
-        .info-grid {
+        .bottom-row {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            grid-template-columns: 300px 1fr;
             gap: 16px;
             margin-bottom: 24px;
+            align-items: stretch;
+        }
+        .bottom-row .log-section {
+            display: flex;
+            flex-direction: column;
+        }
+        .bottom-row .log-section .log-console {
+            flex: 1;
+            max-height: none;
+            min-height: 120px;
         }
 
         .info-card {
@@ -342,6 +352,7 @@
 
         /* Responsive */
         @media (max-width: 1100px) { .stats-row-5 { grid-template-columns: repeat(3, 1fr); } }
+        @media (max-width: 900px)  { .bottom-row  { grid-template-columns: 1fr; } }
         @media (max-width: 768px) {
             .container { padding: 16px; }
             .stats-row-5 { grid-template-columns: repeat(2, 1fr); }
@@ -657,6 +668,11 @@
                 </div><!-- /#cpuControlsSection -->
                 <div id="gpuControlsSection" style="transition:opacity 0.2s;">
                 <div class="form-group">
+                    <label class="form-label">GPU Model</label>
+                    <input class="form-input" id="gpuDevice" type="text" readonly tabindex="-1"
+                           style="opacity:0.8;cursor:default;" title="Detected GPU device — set by the miner at runtime">
+                </div>
+                <div class="form-group">
                     <label class="form-label">VRAM / Work Size <span style="font-size:10px;opacity:0.55;font-weight:400;">(GPU_INTENSITY)</span></label>
                     <div class="intensity-row">
                         <div class="slider-wrap">
@@ -933,37 +949,20 @@
             </div>
         </div>
 
-        <!-- Info Cards -->
-        <div class="info-grid">
-            <div class="info-card">
-                <h3>Connection</h3>
-                <div class="info-row"><span class="info-label">Pool</span><span class="info-value" id="poolAddr">--</span></div>
-                <div class="info-row"><span class="info-label">Wallet</span><span class="info-value" id="walletAddr">--</span></div>
-                <div class="info-row"><span class="info-label">Difficulty</span><span class="info-value" id="difficulty">--</span></div>
-                <div class="info-row"><span class="info-label">Current Job</span><span class="info-value" id="jobId">--</span></div>
-            </div>
+        <!-- System + Activity Log -->
+        <div class="bottom-row">
             <div class="info-card">
                 <h3>System</h3>
                 <div class="info-row"><span class="info-label">Miner Version</span><span class="info-value" id="version">--</span></div>
-                <div class="info-row"><span class="info-label">CPU Threads</span><span class="info-value" id="threads">--</span></div>
-                <div class="info-row"><span class="info-label">GPU Work Size</span><span class="info-value" id="gpuIntensityInfo">--</span></div>
-                <div class="info-row"><span class="info-label">GPU Throttle</span><span class="info-value" id="gpuThrottleInfo">--</span></div>
                 <div class="info-row"><span class="info-label">Algorithm</span><span class="info-value">Scrypt-DT</span></div>
+                <div class="info-row"><span class="info-label">Difficulty</span><span class="info-value" id="difficulty">--</span></div>
+                <div class="info-row"><span class="info-label">Current Job</span><span class="info-value" id="jobId">--</span></div>
             </div>
-            <div class="info-card">
-                <h3>GPU</h3>
-                <div class="info-row"><span class="info-label">Device</span><span class="info-value" id="gpuDevice">--</span></div>
-                <div class="info-row"><span class="info-label">GPU Hashrate</span><span class="info-value" id="gpuHashrateInfo">--</span></div>
-                <div class="info-row"><span class="info-label">Mining Mode</span><span class="info-value" id="miningMode">--</span></div>
-                <div class="info-row"><span class="info-label">Dashboard</span><span class="info-value"><a href="http://127.0.0.1:8883" target="_blank" style="color:var(--blue-primary);text-decoration:none">localhost:8883</a></span></div>
-            </div>
-        </div>
-
-        <!-- Log Console -->
-        <div class="log-section">
-            <h3>Activity Log</h3>
-            <div class="log-console" id="logConsole">
-                <div class="log-entry">DagTech GPU Dashboard initialized...</div>
+            <div class="log-section">
+                <h3>Activity Log</h3>
+                <div class="log-console" id="logConsole">
+                    <div class="log-entry">DagTech GPU Dashboard initialized...</div>
+                </div>
             </div>
         </div>
 
@@ -1123,8 +1122,8 @@
             const rate = data.submitted > 0 ? ((data.accepted / data.submitted) * 100).toFixed(1) : '0.0';
             els.acceptRate.textContent = rate + '% accept rate';
             els.rejected.textContent   = data.rejected + ' rejected';
-            els.poolAddr.textContent   = data.pool;
-            els.walletAddr.textContent = data.wallet;
+            if (els.poolAddr)   els.poolAddr.textContent   = data.pool;
+            if (els.walletAddr) els.walletAddr.textContent = data.wallet;
 
             // Pool / node connection indicator
             const connDot = document.getElementById('poolConnDot');
@@ -1144,7 +1143,7 @@
             els.difficulty.textContent = data.difficulty.toFixed(8);
             els.jobId.textContent      = data.job_id || '--';
             els.version.textContent    = data.version || '--';
-            els.threads.textContent    = data.threads;
+            if (els.threads) els.threads.textContent = data.threads;
 
             // CPU / GPU per-source hashrate card
             const cpuHrEl = document.getElementById('cpuHashrateVal');
