@@ -1228,7 +1228,7 @@
                 );
                 updateGpu(d.gpu_temp ?? null, d.gpu_usage ?? null, d.gpu_name ?? null, d.gpu_vendor ?? null);
                 const devEl = document.getElementById('gpuDevice');
-                if (devEl && d.gpu_name) devEl.textContent = d.gpu_name;
+                if (devEl && d.gpu_name) devEl.value = d.gpu_name;
             } catch (e) {}
         }
 
