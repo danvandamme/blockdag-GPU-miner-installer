@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0526.4"
+set "VERSION=GPU-2026.0526.5"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -558,6 +558,12 @@ if exist "%~dp0dashboard\index.html" (
     copy /y "%~dp0..\dashboard\index.html" "%DASHBOARD_DIR%\" >nul
     echo [GPU Miner] Dashboard installed.
 )
+for %%f in (logo.ico logo.png) do (
+    if exist "%~dp0dashboard\%%f" (
+        copy /y "%~dp0dashboard\%%f" "%DASHBOARD_DIR%\" >nul
+        echo [GPU Miner] Dashboard asset installed: %%f
+    )
+)
 
 REM ============================================================================
 REM 8b. Install control server
@@ -573,7 +579,7 @@ REM ============================================================================
 REM 9. Install launcher scripts
 REM ============================================================================
 echo [GPU Miner] Installing launcher scripts...
-for %%f in (dagtech-start.bat dagtech-stop.bat dagtech-status.bat dagtech-logs.bat dagtech-force-stop.bat dagtech-restart-control.bat) do (
+for %%f in (dagtech-start.bat dagtech-stop.bat dagtech-status.bat dagtech-logs.bat dagtech-force-stop.bat dagtech-restart-control.bat dagtech-uninstall.bat) do (
     if exist "%~dp0%%f" (
         copy /y "%~dp0%%f" "%BIN_DIR%\%%f" >nul
     )
