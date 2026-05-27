@@ -108,7 +108,7 @@ if "!SPACE_CHECK!"=="LOW" (
 )
 
 REM ============================================================================
-REM 1b. Detect GPU(s)
+REM 1b. Detect GPU(s) and vendor
 REM ============================================================================
 echo [GPU Miner] Detecting GPU(s)...
 powershell -Command "Get-WmiObject Win32_VideoController | Select-Object Name | Format-List" 2>nul
@@ -118,6 +118,20 @@ if "!GPU_NAME!"=="" (
 ) else (
     echo [GPU Miner] GPU detected: !GPU_NAME!
 )
+
+REM Detect GPU vendor from the GPU name string (AMD / NVIDIA / Intel)
+set "GPU_VENDOR=unknown"
+echo !GPU_NAME! | findstr /i "AMD Radeon" >nul 2>&1
+if not errorlevel 1 set "GPU_VENDOR=amd"
+if "!GPU_VENDOR!"=="unknown" (
+    echo !GPU_NAME! | findstr /i "NVIDIA GeForce Quadro" >nul 2>&1
+    if not errorlevel 1 set "GPU_VENDOR=nvidia"
+)
+if "!GPU_VENDOR!"=="unknown" (
+    echo !GPU_NAME! | findstr /i "Intel" >nul 2>&1
+    if not errorlevel 1 set "GPU_VENDOR=intel"
+)
+if not "!GPU_VENDOR!"=="unknown" echo [GPU Miner] GPU vendor: !GPU_VENDOR!
 
 REM ============================================================================
 REM 2. Find C Compiler
@@ -257,7 +271,16 @@ if "%HAS_GCC%"=="1" if not exist "%OPENCL_HEADERS_DIR%\libOpenCL.a" (
         )
     ) else (
         echo [GPU Miner] WARNING: OpenCL.dll not found in System32. Install GPU drivers first.
-        echo         GPU compile will likely fail. Install drivers then re-run installer.
+        if /i "!GPU_VENDOR!"=="amd" (
+            echo         AMD GPU detected - install AMD Radeon Software from amd.com/support
+            echo         then re-run this installer.
+        ) else if /i "!GPU_VENDOR!"=="nvidia" (
+            echo         NVIDIA GPU detected - install GeForce drivers from nvidia.com/drivers
+            echo         then re-run this installer.
+        ) else (
+            echo         Install your GPU drivers then re-run this installer.
+        )
+        echo         GPU compile will likely fail without OpenCL.dll.
     )
 )
 
@@ -362,7 +385,15 @@ for /f "tokens=1,* delims=," %%a in ('nvidia-smi --query-gpu^=name^,memory.total
     )
 )
 
-REM Fallback: WMI for AMD/Intel (skips iGPUs with <1 GB AdapterRAM)
+REM Fallback 1: Registry QWORD - reads 64-bit value, bypasses WMI 4 GB cap
+REM   Works for AMD RX 5000/6000/7000 and NVIDIA cards equally.
+REM   HardwareInformation.MemorySize is REG_BINARY or REG_QWORD under the display adapter key.
+set "_REG_VRAM=HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+if "!GPU_VRAM_MB!"=="0" (
+    for /f "tokens=*" %%v in ('powershell -NoProfile -Command "try { $b=$env:_REG_VRAM; $best=0L; Get-ChildItem $b -EA SilentlyContinue ^| Where-Object {$_.PSChildName -match ""^\d{4}$""} ^| ForEach-Object { $p=Get-ItemProperty $_.PSPath -EA SilentlyContinue; $m=$p.""HardwareInformation.MemorySize""; if($m -ne $null){ $n=if($m -is [byte[]]){[BitConverter]::ToInt64(($m+[byte[]](0,0,0,0,0,0,0,0))[0..7],0)}else{[long]$m}; if($n -gt $best){$best=$n} } }; if($best -gt 0){[int]($best/1MB)}else{0} } catch {0}" 2^>nul') do set "GPU_VRAM_MB=%%v"
+)
+
+REM Fallback 2: WMI AdapterRAM - 32-bit field, caps at 4096 MB, last resort
 if "!GPU_VRAM_MB!"=="0" (
     for /f "tokens=*" %%v in ('powershell -NoProfile -Command "try { $g=Get-WmiObject Win32_VideoController ^| Where-Object { $_.AdapterRAM -gt 1GB } ^| Sort-Object AdapterRAM -Desc ^| Select-Object -First 1; if($g){ [int]($g.AdapterRAM/1MB) }else{ 0 } } catch { 0 }" 2^>nul') do set "GPU_VRAM_MB=%%v"
 )
@@ -382,6 +413,13 @@ goto :vram_done
 echo [GPU Miner] Could not detect VRAM - using safe default intensity !REC_GPU_INT!.
 set "DEF_GPU_INT=!REC_GPU_INT!"
 :vram_done
+
+if /i "!GPU_VENDOR!"=="amd" (
+    echo.
+    echo   [AMD GPU] OpenCL platform note:
+    echo   If GPU mining shows 0 H/s after install, edit %CONFIG_FILE%
+    echo   and change GPU_PLATFORM=0 to GPU_PLATFORM=1 then restart the miner.
+)
 
 echo.
 set /p "GPU_INT_INPUT=  GPU intensity 0-100 (default !DEF_GPU_INT!): "
@@ -538,6 +576,7 @@ echo GPU_VRAM_MB=!GPU_VRAM_MB!
 echo GPU_REC_INTENSITY=!REC_GPU_INT!
 echo GPU_PLATFORM=0
 echo GPU_DEVICE=0
+echo GPU_VENDOR=!GPU_VENDOR!
 echo START_MODE=!START_MODE_CHOICE!
 ) > "%CONFIG_FILE%"
 echo [GPU Miner] Config saved.
@@ -712,6 +751,10 @@ echo.
 echo   Config:  %CONFIG_FILE%
 echo   Logs:    %LOG_DIR%
 echo.
+if /i "!GPU_VENDOR!"=="amd" (
+    echo   AMD GPU: if GPU mining shows 0 H/s, edit config.env and try GPU_PLATFORM=1
+    echo.
+)
 if /i "!START_MODE_CHOICE!"=="manual" (
     echo   Start mode: Manual — the miner will NOT start automatically.
     echo   Double-click "DagTech GPU Miner" on your desktop whenever you want to mine.
