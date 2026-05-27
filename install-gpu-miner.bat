@@ -607,6 +607,11 @@ for %%f in (logo.ico logo.png) do (
         echo [GPU Miner] Dashboard asset installed: %%f
     )
 )
+REM Also copy logo.ico to bin\ so shortcuts can reference it
+if exist "%~dp0dashboard\logo.ico" (
+    copy /y "%~dp0dashboard\logo.ico" "%BIN_DIR%\logo.ico" >nul
+    echo [GPU Miner] Shortcut icon installed.
+)
 
 REM ============================================================================
 REM 8b. Install control server
@@ -637,34 +642,42 @@ powershell -nologo -command ^
     "$p=[Environment]::GetEnvironmentVariable('PATH','User'); if($p -notlike '*dagtech-gpu-miner\bin*'){[Environment]::SetEnvironmentVariable('PATH','%BIN_DIR%;'+$p,'User')}" >nul 2>&1
 
 REM ============================================================================
-REM 11. Desktop shortcuts
+REM 11. Desktop shortcuts  (all go inside "Miner Shortcuts" folder)
 REM ============================================================================
 echo [GPU Miner] Creating desktop shortcuts...
 
+REM Create "Miner Shortcuts" folder and clean up any old direct shortcuts from previous installs
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$desk=[Environment]::GetFolderPath('Desktop');" ^
+    "$folder=Join-Path $desk 'Miner Shortcuts';" ^
+    "if (-not (Test-Path $folder)){ New-Item -ItemType Directory -Path $folder | Out-Null };" ^
+    "@('DagTech GPU Miner.lnk','DagTech GPU Miner - Stop.lnk','DagTech GPU Miner - Uninstall.lnk','DagTech GPU Miner - Logs.lnk','DagTech GPU Miner - Restart Control.lnk') | ForEach-Object { $old=Join-Path $desk $_; if (Test-Path $old){ Remove-Item $old -Force } }"
+echo [GPU Miner] Shortcut folder ready: "Miner Shortcuts"
+
 REM -- Start shortcut --
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-start.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Start DagTech GPU Miner - dagtech.network'; $s.IconLocation='%BIN_DIR%\dagtech-gpu-miner.exe,0'; $s.Save()"
-if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner"
+    "$d=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Miner Shortcuts'; $lnk=Join-Path $d 'DagTech GPU Miner.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-start.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Start DagTech GPU Miner'; $s.IconLocation='%BIN_DIR%\logo.ico,0'; $s.Save()"
+if not errorlevel 1 echo [GPU Miner] Shortcut created: "DagTech GPU Miner"
 
 REM -- Stop shortcut --
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner - Stop.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-stop.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Stop DagTech GPU Miner'; $s.Save()"
-if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Stop"
+    "$d=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Miner Shortcuts'; $lnk=Join-Path $d 'DagTech GPU Miner - Stop.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-stop.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Stop DagTech GPU Miner'; $s.IconLocation='%BIN_DIR%\logo.ico,0'; $s.Save()"
+if not errorlevel 1 echo [GPU Miner] Shortcut created: "DagTech GPU Miner - Stop"
 
 REM -- Uninstall shortcut --
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner - Uninstall.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-uninstall.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Uninstall DagTech GPU Miner'; $s.Save()"
-if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Uninstall"
+    "$d=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Miner Shortcuts'; $lnk=Join-Path $d 'DagTech GPU Miner - Uninstall.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-uninstall.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Uninstall DagTech GPU Miner'; $s.IconLocation='%BIN_DIR%\logo.ico,0'; $s.Save()"
+if not errorlevel 1 echo [GPU Miner] Shortcut created: "DagTech GPU Miner - Uninstall"
 
 REM -- Logs shortcut --
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner - Logs.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-logs.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='View DagTech GPU Miner live log'; $s.Save()"
-if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Logs"
+    "$d=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Miner Shortcuts'; $lnk=Join-Path $d 'DagTech GPU Miner - Logs.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-logs.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='View DagTech GPU Miner live log'; $s.IconLocation='%BIN_DIR%\logo.ico,0'; $s.Save()"
+if not errorlevel 1 echo [GPU Miner] Shortcut created: "DagTech GPU Miner - Logs"
 
-REM -- Restart Control Server shortcut --
+REM -- Restart Control shortcut --
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$d=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $d 'DagTech GPU Miner - Restart Control.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-restart-control.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Restart DagTech GPU Miner control server (use after updates)'; $s.Save()"
-if not errorlevel 1 echo [GPU Miner] Desktop shortcut created: "DagTech GPU Miner - Restart Control"
+    "$d=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Miner Shortcuts'; $lnk=Join-Path $d 'DagTech GPU Miner - Restart Control.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-restart-control.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Restart DagTech GPU Miner control server'; $s.IconLocation='%BIN_DIR%\logo.ico,0'; $s.Save()"
+if not errorlevel 1 echo [GPU Miner] Shortcut created: "DagTech GPU Miner - Restart Control"
 
 REM ============================================================================
 REM 12. Auto-start via Task Scheduler
@@ -742,7 +755,7 @@ echo   =====================================================
 echo     DagTech GPU Miner Installation Complete!
 echo   =====================================================
 echo.
-echo   Desktop shortcuts created:
+echo   Shortcuts in "Miner Shortcuts" folder on your Desktop:
 echo     "DagTech GPU Miner"             - starts mining
 echo     "DagTech GPU Miner - Stop"      - stops mining
 echo     "DagTech GPU Miner - Logs"      - view live log in terminal
