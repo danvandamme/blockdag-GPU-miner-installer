@@ -77,6 +77,9 @@ Open `C:\dagtech-gpu-miner\config.env` in Notepad to edit settings. Restart the 
 | `GPU_PLATFORM` | OpenCL platform index — try `1` if GPU shows 0 H/s |
 | `GPU_DEVICE` | OpenCL device index within the platform (usually `0`) |
 | `GPU_VENDOR` | Detected vendor (`amd`, `nvidia`, `intel`) — informational |
+| `WATCHDOG_RESTART_DELAY` | Seconds miner must be continuously down before the first auto-restart attempt (default `60`) |
+| `WATCHDOG_RETRY_INTERVAL` | Seconds to wait between subsequent restart attempts if the miner keeps failing (default `300`) |
+| `WATCHDOG_MAX_RETRIES` | Max number of auto-restart attempts before giving up; `0` = unlimited (default `0`) |
 | `START_MODE` | `service`, `login`, or `manual` |
 | `MINING_MODE` | `both` (CPU+GPU), `gpu`, or `cpu` |
 | `METRICS_PORT` | Port for the miner metrics API (default `8882`) |

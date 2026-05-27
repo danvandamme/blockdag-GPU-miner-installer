@@ -48,9 +48,16 @@ if (Test-Path $PIDFILE) {
 [System.IO.File]::WriteAllText($PIDFILE, "$PID")
 
 $script:StartMode = "service"
+# Watchdog defaults — overridden by config.env values below
+$script:WatchdogRestartDelay  = 60    # seconds miner must be down before first restart attempt
+$script:WatchdogRetryInterval = 300   # seconds between subsequent restart attempts
+$script:WatchdogMaxRetries    = 0     # 0 = unlimited retries
 if (Test-Path $script:CONFIG) {
     Get-Content $script:CONFIG | ForEach-Object {
-        if ($_ -match '^START_MODE=(.+)$') { $script:StartMode = $Matches[1].Trim() }
+        if ($_ -match '^START_MODE=(.+)$')              { $script:StartMode             = $Matches[1].Trim() }
+        if ($_ -match '^WATCHDOG_RESTART_DELAY=(\d+)$') { $script:WatchdogRestartDelay  = [int]$Matches[1] }
+        if ($_ -match '^WATCHDOG_RETRY_INTERVAL=(\d+)$'){ $script:WatchdogRetryInterval = [int]$Matches[1] }
+        if ($_ -match '^WATCHDOG_MAX_RETRIES=(\d+)$')   { $script:WatchdogMaxRetries    = [int]$Matches[1] }
     }
 }
 
@@ -225,7 +232,10 @@ function Send-Response {
 }
 
 # Watchdog — checked inline on the main thread after each request (no threading issues)
-$script:LastWatchdog = [datetime]::UtcNow
+$script:LastWatchdog       = [datetime]::UtcNow
+$script:MinerDownSince     = $null   # set when miner is first detected as not running
+$script:LastRestartAttempt = $null   # set after each restart attempt
+$script:WatchdogRestarts   = 0       # attempt count; resets when miner comes back up
 
 # Detect GPU VRAM and cache recommended intensity to config (runs once; no-op if already cached)
 $null = Detect-GpuVram
@@ -880,9 +890,49 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
     $now = [datetime]::UtcNow
     if (($now - $script:LastWatchdog).TotalSeconds -ge 30) {
         $script:LastWatchdog = $now
-        if (-not (Test-Path $script:STOPFILE) -and -not (Get-MinerProcess)) {
-            Write-Log "Watchdog: miner not running, restarting..."
-            Start-MinerProcess
+
+        if (Test-Path $script:STOPFILE) {
+            # Intentionally stopped — clear all down-tracking
+            $script:MinerDownSince     = $null
+            $script:LastRestartAttempt = $null
+            $script:WatchdogRestarts   = 0
+        } else {
+            if (Get-MinerProcess) {
+                # Miner is healthy — clear down-tracking and log recovery if it was down
+                if ($null -ne $script:MinerDownSince) { Write-Log "Watchdog: miner is back up." }
+                $script:MinerDownSince     = $null
+                $script:LastRestartAttempt = $null
+                $script:WatchdogRestarts   = 0
+            } else {
+                # Miner is not running — start or continue timing
+                if ($null -eq $script:MinerDownSince) {
+                    $script:MinerDownSince = $now
+                    Write-Log "Watchdog: miner not running — will restart after $($script:WatchdogRestartDelay)s if still down."
+                }
+
+                $downSecs   = ($now - $script:MinerDownSince).TotalSeconds
+                $sinceRetry = if ($null -ne $script:LastRestartAttempt) { ($now - $script:LastRestartAttempt).TotalSeconds } else { $downSecs }
+                $unlimited  = ($script:WatchdogMaxRetries -eq 0)
+                $canRetry   = $unlimited -or ($script:WatchdogRestarts -lt $script:WatchdogMaxRetries)
+
+                if ($script:WatchdogRestarts -eq 0 -and $downSecs -ge $script:WatchdogRestartDelay) {
+                    # First restart attempt after the initial delay
+                    Write-Log "Watchdog: miner down $([int]$downSecs)s — restarting (attempt 1)..."
+                    Start-MinerProcess
+                    $script:LastRestartAttempt = $now
+                    $script:WatchdogRestarts   = 1
+                } elseif ($script:WatchdogRestarts -gt 0 -and $canRetry -and $sinceRetry -ge $script:WatchdogRetryInterval) {
+                    # Subsequent retry after the retry interval
+                    $attempt = $script:WatchdogRestarts + 1
+                    Write-Log "Watchdog: miner still down — retrying (attempt $attempt)..."
+                    Start-MinerProcess
+                    $script:LastRestartAttempt = $now
+                    $script:WatchdogRestarts++
+                } elseif ($script:WatchdogRestarts -gt 0 -and -not $canRetry -and $sinceRetry -lt 35) {
+                    # Log once when max retries is reached (only on the cycle it tips over)
+                    Write-Log "Watchdog: max retries ($($script:WatchdogMaxRetries)) reached — manual start required."
+                }
+            }
         }
     }
 }
