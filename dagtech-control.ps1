@@ -919,7 +919,7 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                             $lnk.Save()
                         }
                         Write-Log "Update: desktop shortcuts refreshed in 'Miner Shortcuts' folder."
-                    } catch { $errors.Add('shortcuts: ' + ($_.Exception.Message -replace '"',"'")); Write-Log "Update: shortcut refresh failed — $_" }
+                    } catch { $errors.Add('shortcuts: ' + ($_.Exception.Message -replace '"',"'")); Write-Log "Update: shortcut refresh failed - $_" }
                     # ─ Restart miner if it was running ───────────────────────────────────
                     if ($wasRunning -and -not (Test-Path $script:STOPFILE)) { Start-MinerProcess }
                     $hasCtrl  = (Test-Path (Join-Path $script:BASE "bin\dagtech-control.ps1.new")).ToString().ToLower()
