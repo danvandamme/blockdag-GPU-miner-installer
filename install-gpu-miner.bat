@@ -638,8 +638,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "if (Test-Path $pidFile) { try { $p=Get-Process -Id ([int](Get-Content $pidFile -Raw).Trim()) -ErrorAction Stop; $p | Stop-Process -Force; Start-Sleep -Milliseconds 800 } catch {} }" ^
     "Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*dagtech-control*' } | Stop-Process -Force -ErrorAction SilentlyContinue" 2>nul
 
-if /i "!START_MODE_CHOICE!"=="manual" goto :task_manual
-if /i "!START_MODE_CHOICE!"=="login"  goto :task_login
+if /i "!START_MODE_CHOICE!"=="service" goto :task_service
+if /i "!START_MODE_CHOICE!"=="login"   goto :task_login
+
+:task_manual
+echo   [GPU Miner] Manual-only mode - no scheduled task will be created.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "Unregister-ScheduledTask -TaskName 'DagTech GPU Miner' -Confirm:$false -ErrorAction SilentlyContinue" >nul 2>&1
+if not exist "%INSTALL_DIR%\logs" mkdir "%INSTALL_DIR%\logs" 2>nul
+echo. > "%INSTALL_DIR%\logs\.stop"
+echo   [GPU Miner] Miner installed. Use the "DagTech GPU Miner" desktop shortcut to start mining.
+goto :task_done
 
 :task_service
 echo   [GPU Miner] Registering auto-start scheduled task (system service, starts at boot)...
@@ -672,16 +681,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Remove-Item '%INSTALL_DIR%\logs\.stop' -Force -ErrorAction SilentlyContinue;" ^
     "$st=Get-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
     "if ($st) { Start-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue; Write-Host ('[GPU Miner] Task registered and started (login). State: ' + $st.State) } else { Write-Host '[GPU Miner] ERROR: Task registration failed - try running installer as Administrator.' }"
-
 goto :task_done
-
-:task_manual
-echo   [GPU Miner] Manual-only mode — no scheduled task will be created.
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Unregister-ScheduledTask -TaskName 'DagTech GPU Miner' -Confirm:$false -ErrorAction SilentlyContinue" >nul 2>&1
-if not exist "%INSTALL_DIR%\logs" mkdir "%INSTALL_DIR%\logs" 2>nul
-echo. > "%INSTALL_DIR%\logs\.stop"
-echo   [GPU Miner] Miner installed. Use the "DagTech GPU Miner" desktop shortcut to start mining.
 
 :task_done
 
