@@ -582,6 +582,21 @@
                     <label class="form-label">Wallet Address</label>
                     <input class="form-input" id="cfgWallet" type="text" placeholder="your_wallet_address" spellcheck="false" autocomplete="off">
                 </div>
+                <!-- Pool Profiles -->
+                <div style="margin-top:4px;margin-bottom:14px;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid var(--border-color)">
+                    <div class="form-label" style="margin-bottom:8px;opacity:.65;">&#128190; Pool Profiles <span style="font-weight:400;opacity:.8;">— saved in browser</span></div>
+                    <div style="display:flex;gap:6px;align-items:center">
+                        <select id="poolProfileSelect" class="form-input" style="flex:1;font-size:12px;padding:6px 8px">
+                            <option value="">— select a saved profile —</option>
+                        </select>
+                        <button class="btn-modal-cancel" onclick="loadPoolProfile()" title="Load into fields below" style="padding:6px 11px;white-space:nowrap">Load</button>
+                        <button class="btn-modal-cancel" onclick="deletePoolProfile()" title="Delete selected profile" style="padding:6px 10px;color:#ef4444;border-color:rgba(239,68,68,0.25)">&#x1F5D1;</button>
+                    </div>
+                    <div style="display:flex;gap:6px;align-items:center;margin-top:7px">
+                        <input class="form-input" id="poolProfileName" type="text" placeholder="Profile name — e.g. DagTech Main" style="flex:1;font-size:12px;padding:6px 8px" spellcheck="false" maxlength="40" onkeydown="if(event.key==='Enter')savePoolProfile()">
+                        <button class="btn-modal-cancel" onclick="savePoolProfile()" title="Save current host / port / worker as a named profile" style="padding:6px 11px;white-space:nowrap">Save</button>
+                    </div>
+                </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label class="form-label">Pool Host</label>
@@ -590,21 +605,6 @@
                     <div class="form-group">
                         <label class="form-label">Pool Port</label>
                         <input class="form-input" id="cfgPoolPort" type="number" placeholder="3333" min="1" max="65535">
-                    </div>
-                </div>
-                <!-- Pool Profiles -->
-                <div style="margin-top:4px;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid var(--border-color)">
-                    <div class="form-label" style="margin-bottom:8px;opacity:.65;">&#128190; Pool Profiles <span style="font-weight:400;opacity:.8;">— saved in browser</span></div>
-                    <div style="display:flex;gap:6px;align-items:center">
-                        <select id="poolProfileSelect" class="form-input" style="flex:1;font-size:12px;padding:6px 8px">
-                            <option value="">— select a saved profile —</option>
-                        </select>
-                        <button class="btn-modal-cancel" onclick="loadPoolProfile()" title="Load into fields above" style="padding:6px 11px;white-space:nowrap">Load</button>
-                        <button class="btn-modal-cancel" onclick="deletePoolProfile()" title="Delete selected profile" style="padding:6px 10px;color:#ef4444;border-color:rgba(239,68,68,0.25)">&#x1F5D1;</button>
-                    </div>
-                    <div style="display:flex;gap:6px;align-items:center;margin-top:7px">
-                        <input class="form-input" id="poolProfileName" type="text" placeholder="Profile name — e.g. DagTech Main" style="flex:1;font-size:12px;padding:6px 8px" spellcheck="false" maxlength="40" onkeydown="if(event.key==='Enter')savePoolProfile()">
-                        <button class="btn-modal-cancel" onclick="savePoolProfile()" title="Save current host / port / worker as a named profile" style="padding:6px 11px;white-space:nowrap">Save</button>
                     </div>
                 </div>
                 <div class="form-row">
