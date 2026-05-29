@@ -1730,8 +1730,8 @@
                     document.getElementById('updLatestVer').className = 'update-val same-ver';
                     document.getElementById('btnApplyUpdate').style.display = 'none';
                     if (data.restart_required) {
-                        document.getElementById('btnRestartServer').style.display = '';
-                        document.getElementById('updStatus').textContent += '\nControl server update pending — restart to apply.';
+                        document.getElementById('updStatus').textContent += '\nRestarting control server to apply update…';
+                        setTimeout(restartControlServer, 800);
                     }
                 }
             } catch(e) {
