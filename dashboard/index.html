@@ -866,6 +866,13 @@
                 <div class="info-row"><span class="info-label">Algorithm</span><span class="info-value">Scrypt-DT</span></div>
                 <div class="info-row"><span class="info-label">Difficulty</span><span class="info-value" id="difficulty">--</span></div>
                 <div class="info-row"><span class="info-label">Current Job</span><span class="info-value" id="jobId">--</span></div>
+                <div class="info-row" style="align-items:center;">
+                    <span class="info-label">Wallet</span>
+                    <span style="display:flex;align-items:center;gap:6px;min-width:0;">
+                        <span class="info-value" id="walletAddr" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px;" title="">--</span>
+                        <button id="btnCopyWallet" onclick="copyWallet()" title="Copy wallet address" style="flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--text-dim);padding:2px 4px;border-radius:4px;font-size:13px;line-height:1;transition:color 0.15s;" onmouseover="this.style.color='var(--text-primary)'" onmouseout="this.style.color='var(--text-dim)'">&#x2398;</button>
+                    </span>
+                </div>
             </div>
             <div class="log-section">
                 <h3>Activity Log</h3>
@@ -927,6 +934,19 @@
             statusPulse:   document.getElementById('statusPulse'),
             logConsole:    document.getElementById('logConsole'),
         };
+
+        function copyWallet() {
+            const addr = document.getElementById('walletAddr')?.textContent?.trim();
+            if (!addr || addr === '--') return;
+            navigator.clipboard.writeText(addr).then(() => {
+                const btn = document.getElementById('btnCopyWallet');
+                if (!btn) return;
+                const orig = btn.innerHTML;
+                btn.innerHTML = '&#x2713;';
+                btn.style.color = 'hsl(142,72%,50%)';
+                setTimeout(() => { btn.innerHTML = orig; btn.style.color = 'var(--text-dim)'; }, 1500);
+            }).catch(() => {});
+        }
 
         function formatUptime(seconds) {
             const h = Math.floor(seconds / 3600);
@@ -1028,7 +1048,10 @@
             els.acceptRate.textContent = rate + '% accept rate';
             els.rejected.textContent   = data.rejected + ' rejected';
             if (els.poolAddr)   els.poolAddr.textContent   = data.pool;
-            if (els.walletAddr) els.walletAddr.textContent = data.wallet;
+            if (els.walletAddr && data.wallet) {
+                els.walletAddr.textContent  = data.wallet;
+                els.walletAddr.title        = data.wallet;
+            }
 
             // Pool / node connection indicator
             const connDot = document.getElementById('poolConnDot');
