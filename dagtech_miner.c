@@ -85,7 +85,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0529.3"
+#define DAGTECH_VERSION       "GPU-2026.0529.4"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -107,6 +107,7 @@ static char password[32]       = "";
 static int  num_threads        = 0;  /* 0 = auto-detect */
 static int  cpu_priority       = 0;  /* 0=normal, 1=low */
 static int  cpu_limit          = 100; /* 1-100: % of CPU time to use per thread */
+static int  gpu_throttle       = 100; /* 1-100: % of GPU time to use (duty-cycle throttle) */
 static volatile int running    = 1;
 static volatile int keep_alive = 1;  /* 0 = clean program exit; stays 1 across reconnects */
 static int  metrics_port       = 8881;  /* built-in metrics/dashboard endpoint */
@@ -787,6 +788,7 @@ static void *dagtech_gpu_thread(void *arg) {
             clSetKernelArg(ctx->kernel, 4, sizeof(cl_uint), &nonce_base);
 
             /* Launch */
+            long long gpu_t0 = dagtech_tick_ms();
             cl_event ev;
             cl_int err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel, 1, NULL,
                                                  &ctx->global_size, NULL, 0, NULL, &ev);
@@ -796,6 +798,7 @@ static void *dagtech_gpu_thread(void *arg) {
             }
             clWaitForEvents(1, &ev);
             clReleaseEvent(ev);
+            long long gpu_elapsed = dagtech_tick_ms() - gpu_t0;
 
             /* Read output */
             cl_uint output_result[2] = { 0xFFFFFFFFu, 0 };
@@ -811,6 +814,24 @@ static void *dagtech_gpu_thread(void *arg) {
             pthread_mutex_lock(&stats_mtx);
             total_hashes += ctx->global_size;
             pthread_mutex_unlock(&stats_mtx);
+
+            /* GPU throttle: duty-cycle sleep proportional to kernel run time.
+             * Sleeps in 100ms chunks so the thread stays responsive to new jobs.
+             * gpu_throttle=50 means GPU runs half the time (50% duty cycle). */
+            if (gpu_throttle < 100 && gpu_elapsed > 0) {
+                long long sleep_ms = gpu_elapsed * (100 - gpu_throttle) / gpu_throttle;
+                long long slept = 0;
+                while (slept < sleep_ms && running) {
+                    long long chunk = sleep_ms - slept;
+                    if (chunk > 100) chunk = 100;
+                    usleep((unsigned int)(chunk * 1000));
+                    slept += chunk;
+                    pthread_mutex_lock(&job_mtx);
+                    int job_changed = (current_job.seq != job_seq);
+                    pthread_mutex_unlock(&job_mtx);
+                    if (job_changed) break;
+                }
+            }
 
             /* If candidate found, CPU re-verify before submitting */
             if (output_result[1] > 0 && output_result[0] != 0xFFFFFFFFu) {
@@ -1499,6 +1520,7 @@ static void dagtech_usage(void) {
     printf("    --gpu                  Force enable GPU mining\n");
     printf("    --no-gpu               Disable GPU mining\n");
     printf("    --gpu-intensity <n|list>  GPU intensity per card: 80, 80,60 (default: 80)\n");
+    printf("    --gpu-throttle <n>     GPU duty-cycle limit percent (1-100, default: 100)\n");
     printf("    --gpu-platform <n>     OpenCL platform index (default: 0)\n");
     printf("    --gpu-device <n|n,m|all>  OpenCL device(s): 0, 0,1, all (default: 0)\n");
     printf("    --config <path>        Load config from file\n");
@@ -1506,7 +1528,7 @@ static void dagtech_usage(void) {
     printf("    --help                 Show this help\n");
     printf("\n");
     printf("  Config file keys: WALLET, POOL, PORT, THREADS, WORKER, CPU_LIMIT,\n");
-    printf("    GPU_ENABLED, GPU_INTENSITY, GPU_PLATFORM, GPU_DEVICE\n");
+    printf("    GPU_ENABLED, GPU_INTENSITY, GPU_THROTTLE, GPU_PLATFORM, GPU_DEVICE\n");
     printf("\n");
 }
 
@@ -1576,6 +1598,7 @@ static void dagtech_load_config(const char *path) {
         else if (strcmp(key, "PASSWORD")     == 0) strncpy(password,     val, sizeof(password)     - 1);
         else if (strcmp(key, "LOW_PRIORITY") == 0) cpu_priority  = atoi(val);
         else if (strcmp(key, "CPU_LIMIT")    == 0) { cpu_limit = atoi(val); if (cpu_limit < 1) cpu_limit = 1; if (cpu_limit > 100) cpu_limit = 100; }
+        else if (strcmp(key, "GPU_THROTTLE") == 0) { gpu_throttle = atoi(val); if (gpu_throttle < 1) gpu_throttle = 1; if (gpu_throttle > 100) gpu_throttle = 100; }
         else if (strcmp(key, "METRICS_PORT") == 0) metrics_port  = atoi(val);
         else if (strcmp(key, "DASHBOARD_DIR")== 0) strncpy(dashboard_dir,val, sizeof(dashboard_dir)- 1);
         else if (strcmp(key, "GPU_ENABLED")  == 0) gpu_enabled   = atoi(val);
@@ -1638,6 +1661,7 @@ static int dagtech_save_config(const char *path) {
     fprintf(f, "PASSWORD=%s\n",      password);
     fprintf(f, "LOW_PRIORITY=%d\n",  cpu_priority);
     fprintf(f, "CPU_LIMIT=%d\n",     cpu_limit);
+    fprintf(f, "GPU_THROTTLE=%d\n",  gpu_throttle);
     fprintf(f, "METRICS_PORT=%d\n",  metrics_port);
     fprintf(f, "GPU_ENABLED=%d\n",   gpu_enabled);
     if (gpu_intensity_count > 0) {
@@ -1758,6 +1782,11 @@ int main(int argc, char **argv) {
                 if (gpu_intensity > 100) gpu_intensity = 100;
                 gpu_intensity_count = 0;
             }
+        }
+        else if (strcmp(argv[i], "--gpu-throttle") == 0 && i + 1 < argc) {
+            gpu_throttle = atoi(argv[++i]);
+            if (gpu_throttle < 1)   gpu_throttle = 1;
+            if (gpu_throttle > 100) gpu_throttle = 100;
         }
         else if (strcmp(argv[i], "--gpu-platform") == 0 && i + 1 < argc)
             gpu_platform = atoi(argv[++i]);
