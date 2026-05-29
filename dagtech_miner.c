@@ -85,7 +85,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0529.1"
+#define DAGTECH_VERSION       "GPU-2026.0529.2"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -121,9 +121,13 @@ static int gpu_device    = 0;   /* single-GPU fallback */
 /* Multi-GPU: GPU_DEVICE=0,1 or GPU_DEVICE=all selects devices from gpu_platform */
 #define MAX_GPUS 8
 static int gpu_device_list[MAX_GPUS];
-static int gpu_device_count = 0;  /* 0 = use gpu_device (single) */
-static int gpu_use_all      = 0;  /* 1 = use every GPU on the platform */
-static int g_num_gpus       = 0;  /* GPUs successfully initialised */
+static int gpu_device_count    = 0;  /* 0 = use gpu_device (single) */
+static int gpu_use_all         = 0;  /* 1 = use every GPU on the platform */
+static int g_num_gpus          = 0;  /* GPUs successfully initialised */
+
+/* Per-GPU intensity: GPU_INTENSITY=80,60 overrides the single global per card */
+static int gpu_intensity_list[MAX_GPUS];
+static int gpu_intensity_count = 0;  /* 0 = use gpu_intensity for all GPUs */
 
 /* Stratum connection */
 static int sockfd = -1;
@@ -406,6 +410,9 @@ typedef struct {
     int              gpu_index;    /* 0-based position among active GPUs */
     volatile int     ready;
     char             name[256];
+    int              intensity;        /* actual intensity used for this GPU */
+    uint64_t         hashes_session;   /* per-GPU hash counter */
+    double           hashrate;         /* per-GPU H/s updated by stats loop */
 } GpuCtx;
 
 static GpuCtx g_gpus[MAX_GPUS];
@@ -559,10 +566,12 @@ static int gpu_init_one(GpuCtx *ctx, cl_platform_id platform, int platform_idx,
         return -1;
     }
 
-    /* Work size and V buffer */
-    ctx->global_size = gpu_intensity_to_global_size(gpu_intensity);
+    /* Work size and V buffer — use per-GPU intensity if provided */
+    ctx->intensity   = (gpu_intensity_count > gpu_index) ?
+                        gpu_intensity_list[gpu_index] : gpu_intensity;
+    ctx->global_size = gpu_intensity_to_global_size(ctx->intensity);
     printf("[DagTech GPU] GPU %d: global work size %zu (intensity %d)\n",
-           gpu_index, ctx->global_size, gpu_intensity);
+           gpu_index, ctx->global_size, ctx->intensity);
 
     size_t v_bytes = ctx->global_size * 1024 * 32 * sizeof(cl_uint);
     printf("[DagTech GPU] GPU %d: allocating V buffer %.1f MB\n",
@@ -793,9 +802,10 @@ static void *dagtech_gpu_thread(void *arg) {
             clEnqueueReadBuffer(ctx->queue, ctx->output_buf, CL_TRUE, 0,
                                 2 * sizeof(cl_uint), output_result, 0, NULL, NULL);
 
-            /* Account for hashes */
+            /* Account for hashes — aggregate and per-GPU */
             pthread_mutex_lock(&gpu_stats_mtx);
-            gpu_hashes_session += ctx->global_size;
+            ctx->hashes_session += ctx->global_size;
+            gpu_hashes_session  += ctx->global_size;
             pthread_mutex_unlock(&gpu_stats_mtx);
 
             pthread_mutex_lock(&stats_mtx);
@@ -1354,6 +1364,18 @@ static void *dagtech_metrics_thread(void *arg) {
             continue;
         }
 
+        /* Build per-GPU hashrate array string (no lock — same benign race as gpu_hashrate) */
+        char gpu_hr_arr[256] = "[";
+#ifdef DAGTECH_GPU
+        for (int _gi = 0; _gi < g_num_gpus; _gi++) {
+            char _tmp[32];
+            snprintf(_tmp, sizeof(_tmp), "%s%.2f", _gi ? "," : "", g_gpus[_gi].hashrate);
+            strncat(gpu_hr_arr, _tmp, sizeof(gpu_hr_arr) - strlen(gpu_hr_arr) - 2);
+        }
+#endif
+        if (g_num_gpus == 0) strncat(gpu_hr_arr, "0.0", sizeof(gpu_hr_arr) - strlen(gpu_hr_arr) - 2);
+        strncat(gpu_hr_arr, "]", sizeof(gpu_hr_arr) - strlen(gpu_hr_arr) - 1);
+
         /* Build JSON metrics response */
         pthread_mutex_lock(&stats_mtx);
         time_t uptime = time(NULL) - start_time;
@@ -1386,7 +1408,8 @@ static void *dagtech_metrics_thread(void *arg) {
             "\"uptime\":%ld,"
             "\"job_id\":\"%s\","
             "\"gpu_enabled\":%d,"
-            "\"gpu_count\":%d"
+            "\"gpu_count\":%d,"
+            "\"gpu_hashrates\":%s"
             "}",
             DAGTECH_VERSION, pool_host, pool_port,
             wallet, wallet + strlen(wallet) - 4,
@@ -1409,7 +1432,8 @@ static void *dagtech_metrics_thread(void *arg) {
             current_difficulty, (long)uptime,
             current_job.job_id,
             (gpu_enabled == 1) ? 1 : 0,
-            g_num_gpus);
+            g_num_gpus,
+            gpu_hr_arr);
         pthread_mutex_unlock(&stats_mtx);
 
         char response[4096];
@@ -1460,7 +1484,7 @@ static void dagtech_usage(void) {
     printf("    --metrics-port <n>     Metrics HTTP port (default: %d)\n", metrics_port);
     printf("    --gpu                  Force enable GPU mining\n");
     printf("    --no-gpu               Disable GPU mining\n");
-    printf("    --gpu-intensity <n>    GPU work intensity (0-100, default: 80)\n");
+    printf("    --gpu-intensity <n|list>  GPU intensity per card: 80, 80,60 (default: 80)\n");
     printf("    --gpu-platform <n>     OpenCL platform index (default: 0)\n");
     printf("    --gpu-device <n|n,m|all>  OpenCL device(s): 0, 0,1, all (default: 0)\n");
     printf("    --config <path>        Load config from file\n");
@@ -1541,7 +1565,23 @@ static void dagtech_load_config(const char *path) {
         else if (strcmp(key, "METRICS_PORT") == 0) metrics_port  = atoi(val);
         else if (strcmp(key, "DASHBOARD_DIR")== 0) strncpy(dashboard_dir,val, sizeof(dashboard_dir)- 1);
         else if (strcmp(key, "GPU_ENABLED")  == 0) gpu_enabled   = atoi(val);
-        else if (strcmp(key, "GPU_INTENSITY")== 0) { gpu_intensity = atoi(val); if (gpu_intensity < 0) gpu_intensity = 0; if (gpu_intensity > 100) gpu_intensity = 100; }
+        else if (strcmp(key, "GPU_INTENSITY")== 0) {
+            if (strchr(val, ',')) {
+                gpu_intensity_count = 0;
+                char tmp[64]; strncpy(tmp, val, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+                char *tok = strtok(tmp, ",");
+                while (tok && gpu_intensity_count < MAX_GPUS) {
+                    int v = atoi(tok); if (v < 0) v = 0; if (v > 100) v = 100;
+                    gpu_intensity_list[gpu_intensity_count++] = v; tok = strtok(NULL, ",");
+                }
+                if (gpu_intensity_count > 0) gpu_intensity = gpu_intensity_list[0];
+            } else {
+                gpu_intensity = atoi(val);
+                if (gpu_intensity < 0) gpu_intensity = 0;
+                if (gpu_intensity > 100) gpu_intensity = 100;
+                gpu_intensity_count = 0;
+            }
+        }
         else if (strcmp(key, "GPU_PLATFORM") == 0) gpu_platform  = atoi(val);
         else if (strcmp(key, "GPU_DEVICE")   == 0) {
             if (strcmp(val, "all") == 0) {
@@ -1586,7 +1626,14 @@ static int dagtech_save_config(const char *path) {
     fprintf(f, "CPU_LIMIT=%d\n",     cpu_limit);
     fprintf(f, "METRICS_PORT=%d\n",  metrics_port);
     fprintf(f, "GPU_ENABLED=%d\n",   gpu_enabled);
-    fprintf(f, "GPU_INTENSITY=%d\n", gpu_intensity);
+    if (gpu_intensity_count > 0) {
+        fprintf(f, "GPU_INTENSITY=");
+        for (int i = 0; i < gpu_intensity_count; i++)
+            fprintf(f, "%s%d", i ? "," : "", gpu_intensity_list[i]);
+        fprintf(f, "\n");
+    } else {
+        fprintf(f, "GPU_INTENSITY=%d\n", gpu_intensity);
+    }
     fprintf(f, "GPU_PLATFORM=%d\n",  gpu_platform);
     if (gpu_use_all) {
         fprintf(f, "GPU_DEVICE=all\n");
@@ -1681,9 +1728,22 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--no-gpu") == 0)
             gpu_enabled = 0;
         else if (strcmp(argv[i], "--gpu-intensity") == 0 && i + 1 < argc) {
-            gpu_intensity = atoi(argv[++i]);
-            if (gpu_intensity < 0)   gpu_intensity = 0;
-            if (gpu_intensity > 100) gpu_intensity = 100;
+            const char *val = argv[++i];
+            if (strchr(val, ',')) {
+                gpu_intensity_count = 0;
+                char tmp[64]; strncpy(tmp, val, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+                char *tok = strtok(tmp, ",");
+                while (tok && gpu_intensity_count < MAX_GPUS) {
+                    int v = atoi(tok); if (v < 0) v = 0; if (v > 100) v = 100;
+                    gpu_intensity_list[gpu_intensity_count++] = v; tok = strtok(NULL, ",");
+                }
+                if (gpu_intensity_count > 0) gpu_intensity = gpu_intensity_list[0];
+            } else {
+                gpu_intensity = atoi(val);
+                if (gpu_intensity < 0)   gpu_intensity = 0;
+                if (gpu_intensity > 100) gpu_intensity = 100;
+                gpu_intensity_count = 0;
+            }
         }
         else if (strcmp(argv[i], "--gpu-platform") == 0 && i + 1 < argc)
             gpu_platform = atoi(argv[++i]);
@@ -1813,6 +1873,12 @@ int main(int argc, char **argv) {
         current_job.valid = 0;
         cpu_hashes_session = 0;
         gpu_hashes_session = 0;
+#ifdef DAGTECH_GPU
+        for (int _gi = 0; _gi < g_num_gpus; _gi++) {
+            g_gpus[_gi].hashes_session = 0;
+            g_gpus[_gi].hashrate       = 0.0;
+        }
+#endif
 
         printf("[DagTech] Connecting to pool %s:%d...\n", pool_host, pool_port);
         if (dagtech_connect_pool() < 0) {
@@ -1879,6 +1945,10 @@ int main(int argc, char **argv) {
         uint64_t last_total  = 0;
         uint64_t last_cpu_h  = 0;
         uint64_t last_gpu_h  = 0;
+#ifdef DAGTECH_GPU
+        uint64_t last_gpu_ind[MAX_GPUS];
+        memset(last_gpu_ind, 0, sizeof(last_gpu_ind));
+#endif
         while (running) {
             sleep(10);
             time_t now = time(NULL);
@@ -1894,25 +1964,58 @@ int main(int argc, char **argv) {
 
                 pthread_mutex_lock(&gpu_stats_mtx);
                 uint64_t gh = gpu_hashes_session;
+#ifdef DAGTECH_GPU
+                uint64_t _ghi[MAX_GPUS];
+                for (int _gi = 0; _gi < g_num_gpus; _gi++)
+                    _ghi[_gi] = g_gpus[_gi].hashes_session;
+#endif
                 pthread_mutex_unlock(&gpu_stats_mtx);
 
                 current_hashrate = (h  - last_total) / elapsed;
                 cpu_hashrate     = (ch - last_cpu_h) / elapsed;
                 gpu_hashrate     = (gh - last_gpu_h) / elapsed;
+#ifdef DAGTECH_GPU
+                for (int _gi = 0; _gi < g_num_gpus; _gi++) {
+                    g_gpus[_gi].hashrate = (_ghi[_gi] - last_gpu_ind[_gi]) / elapsed;
+                    last_gpu_ind[_gi]    = _ghi[_gi];
+                }
+#endif
 
                 time_t uptime = now - start_time;
                 int up_h = (int)(uptime / 3600);
                 int up_m = (int)((uptime % 3600) / 60);
 
                 if (gpu_enabled == 1) {
-                    printf("[DagTech] %.2f H/s | CPU: %.2f H/s | GPU[%d]: %.2f H/s | "
+#ifdef DAGTECH_GPU
+                    if (g_num_gpus > 1) {
+                        /* Per-GPU breakdown when multiple cards active */
+                        char _gd[512] = "";
+                        for (int _gi = 0; _gi < g_num_gpus; _gi++) {
+                            char _t[48];
+                            snprintf(_t, sizeof(_t), " | GPU[%d]: %.2f H/s",
+                                     _gi, g_gpus[_gi].hashrate);
+                            strncat(_gd, _t, sizeof(_gd) - strlen(_gd) - 1);
+                        }
+                        printf("[DagTech] %.2f H/s | CPU: %.2f H/s%s | "
+                               "Shares: %lu/%lu/%lu/%lu (sub/acc/rej/stale) | Uptime: %dh%dm\n",
+                               current_hashrate, cpu_hashrate, _gd,
+                               (unsigned long)total_submitted,
+                               (unsigned long)total_accepted,
+                               (unsigned long)total_rejected,
+                               (unsigned long)total_stale,
+                               up_h, up_m);
+                    } else
+#endif
+                    {
+                    printf("[DagTech] %.2f H/s | CPU: %.2f H/s | GPU: %.2f H/s | "
                            "Shares: %lu/%lu/%lu/%lu (sub/acc/rej/stale) | Uptime: %dh%dm\n",
-                           current_hashrate, cpu_hashrate, g_num_gpus, gpu_hashrate,
+                           current_hashrate, cpu_hashrate, gpu_hashrate,
                            (unsigned long)total_submitted,
                            (unsigned long)total_accepted,
                            (unsigned long)total_rejected,
                            (unsigned long)total_stale,
                            up_h, up_m);
+                    }
                 } else {
                     printf("[DagTech] %.1f H/s | Shares: %lu/%lu/%lu/%lu (sub/acc/rej/stale) | Uptime: %dh%dm\n",
                            current_hashrate,
