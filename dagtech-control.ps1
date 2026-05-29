@@ -76,6 +76,21 @@ function Write-Log([string]$msg) {
     } catch {}
 }
 
+function Get-ActiveMinerLog {
+    # Returns the miner log file the process is currently writing to.
+    # Prefers today's file when it has content; otherwise picks the most-recently-
+    # modified miner_YYYY-MM-DD.log so the dashboard stays accurate even when the
+    # miner started before midnight (or hasn't been restarted in several days).
+    $today = Join-Path $script:LOGDIR "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
+    if ((Test-Path $today) -and (Get-Item $today).Length -ge 200) { return $today }
+    $best = Get-ChildItem $script:LOGDIR -Filter "miner_*.log" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^miner_\d{4}-\d{2}-\d{2}\.log$' -and $_.Length -ge 200 } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+    if ($best) { return $best.FullName }
+    return $today   # return today's path even if empty (caller handles missing file)
+}
+
 function Read-Config {
     $cfg = @{}
     Get-Content $script:CONFIG | ForEach-Object {
@@ -414,7 +429,7 @@ while ($listener.IsListening) {
                     Send-Response $ctx '{"ok":false,"terminal":false}'
                     break
                 }
-                $logFile = Join-Path $script:LOGDIR "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
+                $logFile = Get-ActiveMinerLog
                 $cmd = @"
 `$Host.UI.RawUI.WindowTitle = 'DagTech GPU Miner - Live Log'
 `$Host.UI.RawUI.BackgroundColor = 'Black'
@@ -527,7 +542,7 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                     $qs = $ctx.Request.Url.Query
                     if ($qs -match '[?&]tail=(\d+)') { $tail = [int]$Matches[1] }
                 } catch {}
-                $logFile = Join-Path $script:LOGDIR "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
+                $logFile = Get-ActiveMinerLog
                 $lines = @()
                 if (Test-Path $logFile) {
                     try {
@@ -690,7 +705,9 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                     cpu_stale        = 0
                     gpu_stale        = 0
                 }
-                $logFile = Join-Path $script:LOGDIR "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
+                # Locate the log the miner is actually writing to — may be from a previous day
+                # if the process started before midnight and has never been restarted.
+                $logFile = Get-ActiveMinerLog
                 if (Test-Path $logFile) {
                     try {
                         $fs     = New-Object System.IO.FileStream($logFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
