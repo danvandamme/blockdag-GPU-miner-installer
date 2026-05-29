@@ -85,7 +85,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0529.2"
+#define DAGTECH_VERSION       "GPU-2026.0529.3"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -1272,13 +1272,27 @@ static void *dagtech_mine_thread(void *arg) {
         pthread_mutex_unlock(&stats_mtx);
         local_hashes = 0;
 
-        /* CPU throttle: sleep proportional to batch time */
+        /* CPU throttle: sleep proportional to batch time.
+         * Sleeps in 100ms chunks so the thread can still respond quickly
+         * to new jobs even when the correct sleep duration is many seconds.
+         * The old 2000ms hard cap broke throttling on slower machines where
+         * a 64-hash batch takes longer than 2s. */
         if (cpu_limit < 100) {
             long long elapsed = dagtech_tick_ms() - t0;
             if (elapsed > 0) {
                 long long sleep_ms = elapsed * (100 - cpu_limit) / cpu_limit;
-                if (sleep_ms > 2000) sleep_ms = 2000;
-                usleep((unsigned int)(sleep_ms * 1000));
+                long long slept = 0;
+                while (slept < sleep_ms && running) {
+                    long long chunk = sleep_ms - slept;
+                    if (chunk > 100) chunk = 100;
+                    usleep((unsigned int)(chunk * 1000));
+                    slept += chunk;
+                    /* Stop sleeping early if a new job arrived */
+                    pthread_mutex_lock(&job_mtx);
+                    int job_changed = (current_job.seq != job_seq);
+                    pthread_mutex_unlock(&job_mtx);
+                    if (job_changed) break;
+                }
             }
         }
     }
