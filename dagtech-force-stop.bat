@@ -2,6 +2,14 @@
 :: DagTech GPU Miner - Force Stop
 :: Kills all miner and control server processes, including orphaned instances
 :: that the normal stop tool misses. Safe to run at any time.
+:: Requires Administrator (will self-elevate if needed).
+
+REM ── Self-elevate ─────────────────────────────────────────────────────────────
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
+)
 
 echo.
 echo   DagTech GPU Miner - Force Stop
@@ -44,7 +52,10 @@ taskkill /f /im dagtech-gpu-miner.exe >nul 2>&1 ^
 
 REM ============================================================================
 REM STEP 4 — Kill all control server processes (PowerShell 5 and 7).
-REM          Matches by command-line so orphaned instances are caught too.
+REM          Matches by command-line so orphaned instances (spawned via
+REM          /restart-server and not tracked by Task Scheduler) are caught too.
+REM          Running elevated ensures CommandLine is visible even for processes
+REM          running at higher integrity levels.
 REM ============================================================================
 echo   Killing control server processes...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -62,16 +73,42 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 
 REM ============================================================================
 REM STEP 5 — Also kill by PID file in case command-line match missed it.
+REM          Verifies the PID belongs to a PowerShell process before killing
+REM          so a reused PID can never take out an unrelated process.
 REM ============================================================================
 if exist "C:\dagtech-gpu-miner\logs\control.pid" (
     set /p CTRLPID=<"C:\dagtech-gpu-miner\logs\control.pid"
-    taskkill /f /pid %CTRLPID% >nul 2>&1
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$p = Get-Process -Id %CTRLPID% -ErrorAction SilentlyContinue;" ^
+        "if ($p -and $p.Name -in 'powershell','pwsh') {" ^
+        "    Stop-Process -Id %CTRLPID% -Force -ErrorAction SilentlyContinue;" ^
+        "    Write-Host '  [OK] Killed PID %CTRLPID% from pid file'" ^
+        "} elseif ($p) {" ^
+        "    Write-Host ('  [--] PID %CTRLPID% is ' + $p.Name + ' - not a PowerShell process, skipping')" ^
+        "} else {" ^
+        "    Write-Host '  [--] PID %CTRLPID% from pid file is already gone'" ^
+        "}"
     del "C:\dagtech-gpu-miner\logs\control.pid" >nul 2>&1
-    echo   [OK] Killed PID from pid file
 )
 
 REM ============================================================================
-REM STEP 6 — Brief pause, then verify. Retry kill once if anything survived.
+REM STEP 6 — Release any stale HTTP.sys URL reservation on port 8883.
+REM          When a process is killed without calling HttpListener.Stop(),
+REM          HTTP.sys retains the active port registration (visible as PID 4
+REM          in netstat). The next server launch then fails immediately with
+REM          "Could not bind port 8883 - is another instance already running?"
+REM          Deleting the reservation here clears it. The next elevated start
+REM          recreates it automatically.
+REM          This step requires Administrator - hence the self-elevation above.
+REM ============================================================================
+echo   Releasing HTTP.sys port 8883 reservation...
+netsh http delete urlacl url=http://127.0.0.1:8883/ >nul 2>&1 ^
+    && echo   [OK] HTTP.sys port 8883 reservation released ^
+    || echo   [--] No HTTP.sys reservation found for port 8883 (already clear)
+
+REM ============================================================================
+REM STEP 7 — Brief pause, then verify processes are gone and port is free.
+REM          Retry kill once if anything survived.
 REM ============================================================================
 echo   Verifying...
 timeout /t 2 /nobreak >nul
@@ -93,17 +130,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "        Where-Object { $_.CommandLine -like '*dagtech-control*' }" ^
     "    };" ^
     "    if ($m2 -or $c2) {" ^
-    "        Write-Host '  [WARN] Processes still alive after two kill attempts.' -ForegroundColor Red;" ^
-    "        Write-Host '         Try rebooting, or run this file as Administrator.' -ForegroundColor Red" ^
+    "        Write-Host '  [WARN] Processes still alive after two kill attempts - try rebooting.' -ForegroundColor Red" ^
     "    } else {" ^
     "        Write-Host '  [OK] All miner processes stopped (needed second kill)' -ForegroundColor Green" ^
     "    }" ^
     "} else {" ^
     "    Write-Host '  [OK] All miner processes are stopped' -ForegroundColor Green" ^
+    "};" ^
+    "$portBusy = netstat -ano 2`>nul | Select-String ':8883\s.*LISTENING';" ^
+    "if ($portBusy) {" ^
+    "    Write-Host '  [WARN] Port 8883 is still LISTENING - next start may fail. Try rebooting.' -ForegroundColor Yellow" ^
+    "} else {" ^
+    "    Write-Host '  [OK] Port 8883 is free' -ForegroundColor Green" ^
     "}"
 
 REM ============================================================================
-REM STEP 7 — Re-enable the scheduled task so the miner auto-starts on next
+REM STEP 8 — Re-enable the scheduled task so the miner auto-starts on next
 REM          boot / login as normal. The .stop sentinel is still in place so
 REM          even if the task fires, the control server won't start the miner
 REM          until the user explicitly starts it (dagtech-start.bat clears it).
