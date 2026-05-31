@@ -630,10 +630,14 @@
                 </div>
                 </div><!-- /#cpuControlsSection -->
                 <div id="gpuControlsSection" style="transition:opacity 0.2s;">
-                <div class="form-group">
-                    <label class="form-label">GPU Model</label>
-                    <input class="form-input" id="gpuDevice" type="text" readonly tabindex="-1"
-                           style="opacity:0.8;cursor:default;" title="Detected GPU device — set by the miner at runtime">
+                <div class="form-group" id="gpuDeviceSection">
+                    <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                        <span>GPU Devices</span>
+                        <span id="gpuDetectedCount" style="font-size:11px;font-weight:400;color:var(--text-dim);"></span>
+                    </label>
+                    <div id="gpuDeviceList" style="margin-top:6px;display:flex;flex-direction:column;gap:5px;min-height:26px;">
+                        <span style="font-size:12px;color:var(--text-dim);">Detecting GPUs…</span>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">VRAM / Work Size <span style="font-size:10px;opacity:0.55;font-weight:400;">(GPU_INTENSITY)</span></label>
@@ -1259,18 +1263,39 @@
                     d.mem_used_mb  != null ? d.mem_used_mb  * 1048576 : null,
                     d.mem_total_mb != null ? d.mem_total_mb * 1048576 : null
                 );
-                updateGpu(d.gpu_temp ?? null, d.gpu_usage ?? null, d.gpu_name ?? null, d.gpu_vendor ?? null);
-                const devEl = document.getElementById('gpuDevice');
-                if (devEl && d.gpu_name) devEl.value = d.gpu_name;
+                // Pass full per-GPU array when available, fall back to single-GPU fields
+                updateGpu(d.gpu_temp ?? null, d.gpu_usage ?? null, d.gpu_name ?? null, d.gpu_vendor ?? null, d.gpus ?? null);
             } catch (e) {}
         }
 
-        function updateGpu(temp, usage, name, vendor) {
+        function updateGpu(temp, usage, name, vendor, gpus) {
             const tEl  = document.getElementById('gpuTemp');
             const tSub = document.getElementById('gpuTempStatus');
             const uEl  = document.getElementById('gpuUsage');
             const uSub = document.getElementById('gpuUsageName');
 
+            // Multi-GPU: use hottest card for temp card, sum/avg for usage
+            if (gpus && gpus.length > 1) {
+                const maxTemp  = Math.max(...gpus.map(g => g.temp  ?? 0));
+                const avgUsage = gpus.reduce((s, g) => s + (g.usage ?? 0), 0) / gpus.length;
+                const hotCard  = gpus.find(g => (g.temp ?? 0) === maxTemp);
+
+                tEl.innerHTML = `${maxTemp.toFixed(1)} <span class="stat-unit">°C</span>`;
+                tEl.className = maxTemp < 65 ? 'stat-value green' : maxTemp < 80 ? 'stat-value yellow' : 'stat-value red';
+                // Sub-line: per-GPU breakdown
+                tSub.innerHTML = gpus.map(g =>
+                    `<span style="display:inline-block;margin-right:8px;">GPU${g.index}: ${g.temp != null ? g.temp.toFixed(0)+'°' : '--'}</span>`
+                ).join('');
+
+                uEl.innerHTML = `${avgUsage.toFixed(1)} <span class="stat-unit">%</span>`;
+                uEl.className = avgUsage < 70 ? 'stat-value green' : avgUsage < 90 ? 'stat-value yellow' : 'stat-value red';
+                uSub.innerHTML = gpus.map(g =>
+                    `<span style="display:inline-block;margin-right:8px;">GPU${g.index}: ${g.usage != null ? g.usage.toFixed(0)+'%' : '--'}</span>`
+                ).join('');
+                return;
+            }
+
+            // Single GPU (or no gpus array)
             if (temp === null && usage === null) {
                 tEl.innerHTML = `-- <span class="stat-unit">°C</span>`; tEl.className = 'stat-value purple';
                 tSub.textContent = vendor === 'amd' ? 'AMD: temp needs HWiNFO64' : 'N/A';
@@ -1729,15 +1754,81 @@
             renderPoolProfiles();
         }
 
+        // ── GPU device picker helpers ────────────────────────────────────────────
+
+        function _populateGpuDeviceList(gpus, currentDevice) {
+            const list    = document.getElementById('gpuDeviceList');
+            const countEl = document.getElementById('gpuDetectedCount');
+            if (!list) return;
+
+            if (!gpus || gpus.length === 0) {
+                list.innerHTML = '<span style="font-size:12px;color:var(--text-dim);">No GPUs detected</span>';
+                if (countEl) countEl.textContent = '';
+                return;
+            }
+
+            if (countEl) countEl.textContent = `${gpus.length} GPU${gpus.length > 1 ? 's' : ''} detected`;
+
+            // Determine which device indices are currently enabled
+            const enabledSet = new Set();
+            const dev = (currentDevice || '').trim();
+            if (!dev || dev === 'all') {
+                gpus.forEach(g => enabledSet.add(g.index));
+            } else {
+                dev.split(',').forEach(d => { const n = parseInt(d); if (!isNaN(n)) enabledSet.add(n); });
+            }
+
+            if (gpus.length === 1) {
+                // Single GPU — informational display only, no checkbox needed
+                const g = gpus[0];
+                const vramStr = g.vram_mb ? ` · ${Math.round(g.vram_mb / 1024)} GB VRAM` : '';
+                const recStr  = g.rec_intensity >= 0 ? ` · rec. intensity: ${g.rec_intensity}` : '';
+                list.innerHTML = `<div style="font-size:12px;color:var(--text-primary);padding:5px 8px;border-radius:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);">
+                    GPU 0: <strong>${g.name || 'Unknown GPU'}</strong>
+                    <span style="color:var(--text-dim);">${vramStr}${recStr}</span>
+                </div>`;
+                return;
+            }
+
+            // Multiple GPUs — checkboxes
+            list.innerHTML = gpus.map(g => {
+                const checked  = enabledSet.has(g.index) ? 'checked' : '';
+                const vramStr  = g.vram_mb ? `${Math.round(g.vram_mb / 1024)} GB` : '';
+                const recStr   = g.rec_intensity >= 0 ? `rec. ${g.rec_intensity}` : '';
+                return `<label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:5px 8px;border-radius:6px;background:rgba(255,255,255,0.03);border:1px solid var(--border-color);">
+                    <input type="checkbox" data-gpu-index="${g.index}" ${checked}
+                           style="accent-color:var(--gpu-primary);width:14px;height:14px;flex-shrink:0;cursor:pointer;">
+                    <span style="flex:1;min-width:0;font-size:12px;">
+                        GPU ${g.index}: <strong>${g.name || 'Unknown GPU'}</strong>
+                        ${vramStr ? `<span style="color:var(--text-dim);margin-left:6px;">${vramStr} VRAM</span>` : ''}
+                        ${recStr  ? `<span style="font-size:10px;color:hsl(142,72%,55%);margin-left:6px;">${recStr}</span>` : ''}
+                    </span>
+                </label>`;
+            }).join('');
+        }
+
+        function _getGpuDeviceValue() {
+            const allBoxes = Array.from(document.querySelectorAll('#gpuDeviceList input[data-gpu-index]'));
+            if (allBoxes.length <= 1) return '0';          // single GPU or undetected
+            const checked = allBoxes.filter(el => el.checked).map(el => el.dataset.gpuIndex);
+            if (checked.length === 0) return '0';           // nothing checked — keep device 0
+            if (checked.length === allBoxes.length) return 'all';
+            return checked.join(',');
+        }
+
         async function openConfig() {
             document.getElementById('configStatus').textContent = '';
             document.getElementById('configStatus').style.color = '';
             document.getElementById('configModal').classList.add('open');
             renderPoolProfiles();
+            // Fetch config and GPU list concurrently
+            const [cfgResult, gpuResult] = await Promise.allSettled([
+                fetch(`${CONTROL_URL}/config`,    { signal: AbortSignal.timeout(4000) }),
+                fetch(`${CONTROL_URL}/gpu-stats`, { signal: AbortSignal.timeout(6000) })
+            ]);
             try {
-                const resp = await fetch(`${CONTROL_URL}/config`, { signal: AbortSignal.timeout(4000) });
-                if (!resp.ok) throw new Error();
-                const cfg = await resp.json();
+                if (cfgResult.status !== 'fulfilled' || !cfgResult.value.ok) throw new Error();
+                const cfg = await cfgResult.value.json();
                 document.getElementById('cfgWallet').value      = cfg.WALLET        || '';
                 document.getElementById('cfgPoolHost').value    = cfg.POOL_HOST     || '';
                 document.getElementById('cfgPoolPort').value    = cfg.POOL_PORT     || '';
@@ -1766,6 +1857,16 @@
                 updateThrottleHint(throttle);
                 setMode(cfg.MINING_MODE || 'both');
                 setStartMode(startMode);
+
+                // Populate GPU device picker from /gpu-stats
+                if (gpuResult.status === 'fulfilled' && gpuResult.value.ok) {
+                    const gd = await gpuResult.value.json();
+                    _populateGpuDeviceList(gd.gpus || [], gd.gpu_device || cfg.GPU_DEVICE || '0');
+                } else {
+                    // Fallback: show GPU_DEVICE from config as plain text
+                    const devList = document.getElementById('gpuDeviceList');
+                    if (devList) devList.innerHTML = '<span style="font-size:12px;color:var(--text-dim);">GPU detection unavailable</span>';
+                }
             } catch (e) {
                 const s = document.getElementById('configStatus');
                 s.textContent = 'Could not load config from control server.';
@@ -1899,6 +2000,7 @@
                 GPU_ENABLED:   mode === 'cpu' ? '0' : '1',
                 GPU_INTENSITY: document.getElementById('cfgGpuIntensity').value.trim(),
                 GPU_THROTTLE:  document.getElementById('cfgGpuThrottle').value.trim(),
+                GPU_DEVICE:    _getGpuDeviceValue(),
                 MINING_MODE:   mode,
             };
 

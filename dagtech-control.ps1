@@ -100,37 +100,70 @@ function Read-Config {
 }
 
 function Detect-GpuVram {
-    # Returns @{ vram_mb = <int>; rec_intensity = <int> }
-    # Reads from config cache if already stored; otherwise detects and writes back.
+    # Returns @{ vram_mb = <int>; rec_intensity = <int>; gpu_count = <int> }
+    # Enumerates ALL GPUs (not just the first). Uses the largest VRAM card for the
+    # intensity recommendation. Caches results in config.env; sets GPU_DEVICE=all
+    # automatically when multiple GPUs are found and no device override is set.
     $cfg = Read-Config
-    if ($cfg["GPU_REC_INTENSITY"] -and $cfg["GPU_VRAM_MB"] -ne $null) {
-        return @{ vram_mb = [int]$cfg["GPU_VRAM_MB"]; rec_intensity = [int]$cfg["GPU_REC_INTENSITY"] }
+    if ($cfg["GPU_REC_INTENSITY"] -and $cfg["GPU_VRAM_MB"] -ne $null -and $cfg["GPU_DETECTED_COUNT"]) {
+        return @{
+            vram_mb      = [int]$cfg["GPU_VRAM_MB"]
+            rec_intensity = [int]$cfg["GPU_REC_INTENSITY"]
+            gpu_count    = [int]$cfg["GPU_DETECTED_COUNT"]
+        }
     }
 
-    $vramMb = 0
+    # ── Enumerate GPUs ────────────────────────────────────────────────────────
+    $gpus = [System.Collections.Generic.List[hashtable]]::new()
 
-    # Try nvidia-smi first (exact dedicated VRAM)
+    # Try nvidia-smi first — returns one line per GPU
     try {
-        $nvOut = & nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null
-        if ($nvOut -match '^\d+') { $vramMb = [int]($nvOut.Trim().Split("`n")[0].Trim()) }
+        $nvOut = & nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits 2>$null
+        if ($nvOut) {
+            $idx = 0
+            foreach ($line in ($nvOut -split "`r?`n")) {
+                $line = $line.Trim()
+                if ($line -match '^\d+') {
+                    $parts = $line -split ',\s*', 2
+                    $vmb   = [int]$parts[0].Trim()
+                    $name  = if ($parts.Count -gt 1) { $parts[1].Trim() } else { "NVIDIA GPU $idx" }
+                    $gpus.Add(@{ index = $idx; name = $name; vram_mb = $vmb; vendor = "nvidia" })
+                    $idx++
+                }
+            }
+        }
     } catch {}
 
-    # Fall back to WMI for AMD/Intel (skips iGPUs < 1 GB)
-    if ($vramMb -eq 0) {
+    # Fall back to WMI for AMD/Intel (skips iGPUs with < 1 GB adapter RAM)
+    if ($gpus.Count -eq 0) {
         try {
-            $gpu = Get-WmiObject Win32_VideoController |
-                   Where-Object { $_.AdapterRAM -gt 1073741824 } |
-                   Sort-Object AdapterRAM -Descending |
-                   Select-Object -First 1
-            if ($gpu) { $vramMb = [int]($gpu.AdapterRAM / 1MB) }
+            $wmiGpus = Get-WmiObject Win32_VideoController |
+                       Where-Object { $_.AdapterRAM -gt 1073741824 } |
+                       Sort-Object AdapterRAM -Descending
+            $idx = 0
+            foreach ($wg in $wmiGpus) {
+                $vmb    = [int]($wg.AdapterRAM / 1MB)
+                $name   = $wg.Name
+                $vendor = if ($name -match "NVIDIA") { "nvidia" }
+                          elseif ($name -match "AMD|Radeon") { "amd" }
+                          else { "unknown" }
+                $gpus.Add(@{ index = $idx; name = $name; vram_mb = $vmb; vendor = $vendor })
+                $idx++
+            }
         } catch {}
     }
 
-    # Compute recommended intensity from V-buffer formula (75% of VRAM target)
+    $gpuCount = $gpus.Count
+    # Use maximum VRAM across all cards for the intensity recommendation
+    $maxVram = if ($gpuCount -gt 0) {
+        ($gpus | ForEach-Object { $_.vram_mb } | Measure-Object -Maximum).Maximum
+    } else { 0 }
+
+    # Compute recommended intensity from V-buffer formula (75% of max-VRAM target)
     # V-buffer bytes = 2^E * 128 KB  (E = 14 + intensity/100*6)
     $recInt = 8   # safe fallback when VRAM unknown
-    if ($vramMb -gt 0) {
-        $target = [double]$vramMb * 1048576.0 * 0.75
+    if ($maxVram -gt 0) {
+        $target = [double]$maxVram * 1048576.0 * 0.75
         $e = [Math]::Floor([Math]::Log($target / 131072.0) / [Math]::Log(2.0))
         if ($e -lt 14) { $e = 14 }
         $recInt = [int][Math]::Floor(($e - 13.5) * 100.0 / 6.0 - 0.001)
@@ -138,21 +171,30 @@ function Detect-GpuVram {
         if ($recInt -gt 95) { $recInt = 95 }
     }
 
-    # Cache to config.env so subsequent reads are instant
+    # Cache to config.env. Also default GPU_DEVICE to "all" when multiple GPUs
+    # are present and the user has never explicitly set a device override.
     try {
         $lines   = @(Get-Content $script:CONFIG)
-        $hadVram = $false; $hadRec = $false
+        $hadVram = $false; $hadRec = $false; $hadCnt = $false; $devSet = $false
+        $existingDev = ($lines | Where-Object { $_ -match '^GPU_DEVICE=' } | Select-Object -First 1) -replace '^GPU_DEVICE=',''
         $newLines = @(foreach ($line in $lines) {
-            if ($line -match '^GPU_VRAM_MB=')      { "GPU_VRAM_MB=$vramMb";  $hadVram = $true }
-            elseif ($line -match '^GPU_REC_INTENSITY=') { "GPU_REC_INTENSITY=$recInt"; $hadRec  = $true }
+            if     ($line -match '^GPU_VRAM_MB=')        { "GPU_VRAM_MB=$maxVram";    $hadVram = $true }
+            elseif ($line -match '^GPU_REC_INTENSITY=')  { "GPU_REC_INTENSITY=$recInt"; $hadRec = $true }
+            elseif ($line -match '^GPU_DETECTED_COUNT=') { "GPU_DETECTED_COUNT=$gpuCount"; $hadCnt = $true }
             else { $line }
         })
-        if (-not $hadVram) { $newLines += "GPU_VRAM_MB=$vramMb" }
+        if (-not $hadVram) { $newLines += "GPU_VRAM_MB=$maxVram" }
         if (-not $hadRec)  { $newLines += "GPU_REC_INTENSITY=$recInt" }
+        if (-not $hadCnt)  { $newLines += "GPU_DETECTED_COUNT=$gpuCount" }
+        # Default GPU_DEVICE to "all" for multi-GPU rigs when not explicitly configured
+        if ($gpuCount -gt 1 -and (-not $existingDev -or $existingDev -eq '0')) {
+            if (-not ($newLines -match '^GPU_DEVICE=')) { $newLines += "GPU_DEVICE=all" }
+            else { $newLines = $newLines -replace '^GPU_DEVICE=.*$', 'GPU_DEVICE=all' }
+        }
         [System.IO.File]::WriteAllLines($script:CONFIG, $newLines, (New-Object System.Text.UTF8Encoding $false))
     } catch {}
 
-    return @{ vram_mb = $vramMb; rec_intensity = $recInt }
+    return @{ vram_mb = $maxVram; rec_intensity = $recInt; gpu_count = $gpuCount }
 }
 
 function Get-MinerProcess {
@@ -413,15 +455,82 @@ while ($listener.IsListening) {
             }
             "/gpu-stats" {
                 $cfg = Read-Config
-                $gpuEnabled  = if ($cfg["GPU_ENABLED"])      { $cfg["GPU_ENABLED"] -eq "1" }  else { $false }
-                $gpuIntensity= if ($cfg["GPU_INTENSITY"])    { [int]$cfg["GPU_INTENSITY"] }   else { 80 }
-                $gpuThrottle = if ($cfg["GPU_THROTTLE"])     { [int]$cfg["GPU_THROTTLE"] }    else { 100 }
-                $gpuPlatform = if ($cfg["GPU_PLATFORM"])     { [int]$cfg["GPU_PLATFORM"] }    else { 0 }
-                $gpuDevice   = if ($cfg["GPU_DEVICE"])       { [int]$cfg["GPU_DEVICE"] }      else { 0 }
-                $gpuVramMb   = if ($cfg["GPU_VRAM_MB"])      { [int]$cfg["GPU_VRAM_MB"] }     else { 0 }
-                $gpuRecInt   = if ($cfg["GPU_REC_INTENSITY"]){ [int]$cfg["GPU_REC_INTENSITY"]}else { -1 }
+                $gpuEnabled  = if ($cfg["GPU_ENABLED"])       { $cfg["GPU_ENABLED"] -eq "1" }  else { $false }
+                $gpuIntensity= if ($cfg["GPU_INTENSITY"])     { $cfg["GPU_INTENSITY"] }          else { "80" }
+                $gpuThrottle = if ($cfg["GPU_THROTTLE"])      { [int]$cfg["GPU_THROTTLE"] }      else { 100 }
+                $gpuPlatform = if ($cfg["GPU_PLATFORM"])      { [int]$cfg["GPU_PLATFORM"] }      else { 0 }
+                # GPU_DEVICE can be "0", "0,1", or "all" — keep as string, never cast to int
+                $gpuDevice   = if ($cfg["GPU_DEVICE"])        { $cfg["GPU_DEVICE"].Trim() }      else { "0" }
+                $gpuVramMb   = if ($cfg["GPU_VRAM_MB"])       { [int]$cfg["GPU_VRAM_MB"] }       else { 0 }
+                $gpuRecInt   = if ($cfg["GPU_REC_INTENSITY"]) { [int]$cfg["GPU_REC_INTENSITY"] } else { -1 }
                 $enabledStr  = if ($gpuEnabled) { "true" } else { "false" }
-                Send-Response $ctx ('{"gpu_enabled":' + $enabledStr + ',"gpu_intensity":' + $gpuIntensity + ',"gpu_throttle":' + $gpuThrottle + ',"gpu_platform":' + $gpuPlatform + ',"gpu_device":' + $gpuDevice + ',"gpu_vram_mb":' + $gpuVramMb + ',"gpu_rec_intensity":' + $gpuRecInt + '}')
+
+                # ── Enumerate all GPUs for the device picker ──────────────────
+                # nvidia-smi and WMI are tried in separate try-catch blocks so a
+                # "command not found" exception from a missing nvidia-smi never
+                # prevents the AMD/WMI fallback from running.
+                $gpuListJson = "[]"
+                $gpuItems = [System.Collections.Generic.List[string]]::new()
+                # Try nvidia-smi (NVIDIA GPUs)
+                $nvOut = $null
+                try { $nvOut = & nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits 2>$null } catch {}
+                try {
+                    if ($nvOut) {
+                        $idx = 0
+                        foreach ($nvLine in ($nvOut -split "`r?`n")) {
+                            $nvLine = $nvLine.Trim()
+                            if ($nvLine -match '^\d+') {
+                                $parts = $nvLine -split ',\s*', 2
+                                $vmb   = [int]$parts[0].Trim()
+                                $gname = if ($parts.Count -gt 1) { ($parts[1].Trim() -replace '"',"'") } else { "NVIDIA GPU $idx" }
+                                # Per-GPU rec intensity based on its own VRAM
+                                $gRec = 8
+                                if ($vmb -gt 0) {
+                                    $gt = [double]$vmb * 1048576.0 * 0.75
+                                    $ge = [Math]::Floor([Math]::Log($gt / 131072.0) / [Math]::Log(2.0))
+                                    if ($ge -lt 14) { $ge = 14 }
+                                    $gRec = [int][Math]::Floor(($ge - 13.5) * 100.0 / 6.0 - 0.001)
+                                    if ($gRec -lt 5)  { $gRec = 5 }
+                                    if ($gRec -gt 95) { $gRec = 95 }
+                                }
+                                $gpuItems.Add('{"index":' + $idx + ',"name":"' + $gname + '","vram_mb":' + $vmb + ',"rec_intensity":' + $gRec + ',"vendor":"nvidia"}')
+                                $idx++
+                            }
+                        }
+                    }
+                } catch {}
+                # AMD / Intel fallback via WMI (own try-catch so nvidia failure can't block it)
+                if ($gpuItems.Count -eq 0) { try {
+                    $idx = 0
+                    foreach ($wg in (Get-WmiObject Win32_VideoController | Where-Object { $_.AdapterRAM -gt 1073741824 } | Sort-Object AdapterRAM -Descending)) {
+                        $vmb   = [int]($wg.AdapterRAM / 1MB)
+                        $gname = ($wg.Name -replace '"',"'")
+                        $vendor = if ($gname -match "NVIDIA") { "nvidia" } elseif ($gname -match "AMD|Radeon") { "amd" } else { "unknown" }
+                        $gRec = 8
+                        if ($vmb -gt 0) {
+                            $gt = [double]$vmb * 1048576.0 * 0.75
+                            $ge = [Math]::Floor([Math]::Log($gt / 131072.0) / [Math]::Log(2.0))
+                            if ($ge -lt 14) { $ge = 14 }
+                            $gRec = [int][Math]::Floor(($ge - 13.5) * 100.0 / 6.0 - 0.001)
+                            if ($gRec -lt 5)  { $gRec = 5 }
+                            if ($gRec -gt 95) { $gRec = 95 }
+                        }
+                        $gpuItems.Add('{"index":' + $idx + ',"name":"' + $gname + '","vram_mb":' + $vmb + ',"rec_intensity":' + $gRec + ',"vendor":"' + $vendor + '"}')
+                        $idx++
+                    }
+                } catch {} }
+                if ($gpuItems.Count -gt 0) { $gpuListJson = '[' + ($gpuItems -join ',') + ']' }
+
+                $intensityJson = if ($gpuIntensity -match '^\d') { $gpuIntensity } else { '"' + $gpuIntensity + '"' }
+                $deviceJson    = '"' + ($gpuDevice -replace '"',"'") + '"'
+                Send-Response $ctx ('{"gpu_enabled":' + $enabledStr +
+                    ',"gpu_intensity":' + $intensityJson +
+                    ',"gpu_throttle":' + $gpuThrottle +
+                    ',"gpu_platform":' + $gpuPlatform +
+                    ',"gpu_device":' + $deviceJson +
+                    ',"gpu_vram_mb":' + $gpuVramMb +
+                    ',"gpu_rec_intensity":' + $gpuRecInt +
+                    ',"gpus":' + $gpuListJson + '}')
                 break
             }
             "/open-logs" {
@@ -601,7 +710,8 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                     } catch {}
                 }
 
-                # NVIDIA GPU
+                # NVIDIA GPU(s) — enumerate all cards, not just the first
+                $gpusSysinfo = [System.Collections.Generic.List[string]]::new()
                 if (-not $out.ContainsKey("gpu_temp")) { try {
                     $nvPaths = @(
                         "nvidia-smi",
@@ -616,12 +726,25 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                     if ($nvExe) {
                         $nv = & $nvExe --query-gpu=temperature.gpu,utilization.gpu,name --format=csv,noheader,nounits 2>$null
                         if ($nv) {
-                            $p = ($nv | Select-Object -First 1).Trim() -split ',\s*'
-                            if ($p.Count -ge 3) {
-                                $out["gpu_temp"]   = [double]$p[0].Trim()
-                                $out["gpu_usage"]  = [double]$p[1].Trim()
-                                $out["gpu_name"]   = $p[2].Trim()
-                                $out["gpu_vendor"] = "nvidia"
+                            $gIdx = 0
+                            foreach ($nvLine in ($nv -split "`r?`n")) {
+                                $nvLine = $nvLine.Trim()
+                                if (-not $nvLine) { continue }
+                                $p = $nvLine -split ',\s*'
+                                if ($p.Count -ge 3) {
+                                    $gTemp  = [double]$p[0].Trim()
+                                    $gUsage = [double]$p[1].Trim()
+                                    $gName  = ($p[2].Trim() -replace '"',"'")
+                                    # Primary card fields (first GPU — backward compat)
+                                    if ($gIdx -eq 0) {
+                                        $out["gpu_temp"]   = $gTemp
+                                        $out["gpu_usage"]  = $gUsage
+                                        $out["gpu_name"]   = $p[2].Trim()
+                                        $out["gpu_vendor"] = "nvidia"
+                                    }
+                                    $gpusSysinfo.Add('{"index":' + $gIdx + ',"temp":' + $gTemp + ',"usage":' + $gUsage + ',"name":"' + $gName + '","vendor":"nvidia"}')
+                                    $gIdx++
+                                }
                             }
                         }
                     }
@@ -663,6 +786,9 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                     if ($v -is [string]) { $kvs += ('"' + $k + '":"' + ($v.Replace('\','\\').Replace('"','\"')) + '"') }
                     else                 { $kvs += ('"' + $k + '":' + $v) }
                 }
+                # Append per-GPU array so the dashboard can show per-card stats
+                $gpusSysinfoJson = if ($gpusSysinfo.Count -gt 0) { '[' + ($gpusSysinfo -join ',') + ']' } else { '[]' }
+                $kvs += '"gpus":' + $gpusSysinfoJson
                 Send-Response $ctx ('{' + ($kvs -join ',') + '}')
                 break
             }
