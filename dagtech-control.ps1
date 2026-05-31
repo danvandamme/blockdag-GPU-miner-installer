@@ -1,4 +1,4 @@
-# DagTech GPU Miner Control Server
+﻿# DagTech GPU Miner Control Server
 # Serves the dashboard and manages the GPU miner process lifecycle.
 # Runs on port 8883 so the dashboard stays accessible when the miner is down.
 param([string]$BaseDir = (Split-Path (Split-Path $MyInvocation.MyCommand.Path) -Parent))
@@ -301,31 +301,26 @@ $script:WatchdogRestarts   = 0       # attempt count; resets when miner comes ba
 $null = Detect-GpuVram
 
 # ─── Background cache refresher ─────────────────────────────────────────────
-# /sysinfo and /gpu-stats run WMI and nvidia-smi queries that take 2-8 seconds.
-# Running them on the single-threaded request loop means any queued request
-# waits behind the slow call; the client times out and sends FIN before we
-# respond → socket stays CLOSE_WAIT → accumulates until the server stops
-# accepting new connections.
-# Fix: a dedicated RunSpace refreshes the cache every 4 seconds.
-# The main HTTP loop reads only from $script:Cache — it never blocks.
-$script:Cache   = [System.Collections.Hashtable]::Synchronized(@{ Sysinfo = $null; GpuStats = $null })
-$script:CachePS = $null
-$script:CacheRS = $null
+# /sysinfo and /gpu-stats run WMI/nvidia-smi queries that take 2-8 seconds.
+# Running them on the single-threaded request loop blocks all queued requests;
+# clients time out and send FIN → server responds to a closed socket →
+# CLOSE_WAIT accumulates until the listener stops accepting connections.
+# RunSpaces share the same PowerShell process and hit a per-process WMI lock.
+# Fix: Start-Job (a NEW powershell.exe process) runs the collection loop and
+# writes results to temp files. The main loop reads those files in < 1 ms.
+$script:SysinfoFile  = Join-Path $script:LOGDIR "sysinfo.cache.json"
+$script:GpuStatsFile = Join-Path $script:LOGDIR "gpustats.cache.json"
+$script:CacheJob     = $null
 
 function Start-CacheRefresher {
-    if ($script:CachePS) { try { $script:CachePS.Stop(); $script:CachePS.Dispose() } catch {} }
-    if ($script:CacheRS) { try { $script:CacheRS.Close() } catch {} }
+    if ($script:CacheJob) {
+        Stop-Job  $script:CacheJob -ErrorAction SilentlyContinue
+        Remove-Job $script:CacheJob -Force -ErrorAction SilentlyContinue
+        $script:CacheJob = $null
+    }
 
-    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $rs.ApartmentState = 'MTA'
-    $rs.ThreadOptions  = 'ReuseThread'
-    $rs.Open()
-    $rs.SessionStateProxy.SetVariable('Cache',  $script:Cache)
-    $rs.SessionStateProxy.SetVariable('CONFIG', $script:CONFIG)
-
-    $ps = [System.Management.Automation.PowerShell]::Create()
-    $ps.Runspace = $rs
-    $null = $ps.AddScript({
+    $script:CacheJob = Start-Job -ScriptBlock {
+        param($configPath, $siFile, $gsFile, $siTmp, $gsTmp)
 
         function Get-SysinfoJson {
             $out = @{}
@@ -427,8 +422,8 @@ function Start-CacheRefresher {
 
         function Get-GpuStatsJson {
             $cfg = @{}
-            if (Test-Path $CONFIG) {
-                Get-Content $CONFIG | ForEach-Object {
+            if (Test-Path $configPath) {
+                Get-Content $configPath | ForEach-Object {
                     if ($_ -match '^([A-Z_]+)=(.*)$') { $cfg[$Matches[1]] = $Matches[2].Trim() }
                 }
             }
@@ -508,20 +503,25 @@ function Start-CacheRefresher {
         }
 
         while ($true) {
-            try { $Cache['Sysinfo']  = Get-SysinfoJson  } catch {}
-            try { $Cache['GpuStats'] = Get-GpuStatsJson } catch {}
+            try {
+                $json = Get-SysinfoJson
+                [System.IO.File]::WriteAllText($siTmp, $json, [System.Text.Encoding]::UTF8)
+                Move-Item $siTmp $siFile -Force -ErrorAction Stop
+            } catch {}
+            try {
+                $json = Get-GpuStatsJson
+                [System.IO.File]::WriteAllText($gsTmp, $json, [System.Text.Encoding]::UTF8)
+                Move-Item $gsTmp $gsFile -Force -ErrorAction Stop
+            } catch {}
             Start-Sleep -Seconds 4
         }
-    })
+    } -ArgumentList $script:CONFIG, $script:SysinfoFile, $script:GpuStatsFile, ($script:SysinfoFile + '.tmp'), ($script:GpuStatsFile + '.tmp')
 
-    $script:CacheRS = $rs
-    $script:CachePS = $ps
-    $null = $ps.BeginInvoke()
-    Write-Log "Background cache refresher started."
+    Write-Log "Background cache refresher started (Job $($script:CacheJob.Id))."
 }
 
-# Warm the cache synchronously on the main thread before opening the listener,
-# so the very first dashboard request never sees empty data.
+# Start cache refresh job — runs WMI/nvidia-smi in a separate process so
+# the synchronous request loop is never blocked on slow queries.
 Start-CacheRefresher
 
 # Start listener
@@ -681,9 +681,91 @@ while ($listener.IsListening) {
                 break
             }
             "/gpu-stats" {
-                # Background RunSpace keeps this warm — never blocks the main loop
-                $json = $script:Cache['GpuStats']
+                # Background job (separate process) writes this every 4 s — main loop never blocks
+                $json = if (Test-Path $script:GpuStatsFile) {
+                    try { [System.IO.File]::ReadAllText($script:GpuStatsFile) } catch { $null }
+                } else { $null }
                 Send-Response $ctx $(if ($json) { $json } else { '{"gpu_enabled":false,"gpus":[]}' })
+                break
+            }
+            "/_gpu-stats-old" {
+                $cfg = Read-Config
+                $gpuEnabled  = if ($cfg["GPU_ENABLED"])       { $cfg["GPU_ENABLED"] -eq "1" }  else { $false }
+                $gpuIntensity= if ($cfg["GPU_INTENSITY"])     { $cfg["GPU_INTENSITY"] }          else { "80" }
+                $gpuThrottle = if ($cfg["GPU_THROTTLE"])      { [int]$cfg["GPU_THROTTLE"] }      else { 100 }
+                $gpuPlatform = if ($cfg["GPU_PLATFORM"])      { [int]$cfg["GPU_PLATFORM"] }      else { 0 }
+                # GPU_DEVICE can be "0", "0,1", or "all" — keep as string, never cast to int
+                $gpuDevice   = if ($cfg["GPU_DEVICE"])        { $cfg["GPU_DEVICE"].Trim() }      else { "0" }
+                $gpuVramMb   = if ($cfg["GPU_VRAM_MB"])       { [int]$cfg["GPU_VRAM_MB"] }       else { 0 }
+                $gpuRecInt   = if ($cfg["GPU_REC_INTENSITY"]) { [int]$cfg["GPU_REC_INTENSITY"] } else { -1 }
+                $enabledStr  = if ($gpuEnabled) { "true" } else { "false" }
+
+                # ── Enumerate all GPUs for the device picker ──────────────────
+                # nvidia-smi and WMI are tried in separate try-catch blocks so a
+                # "command not found" exception from a missing nvidia-smi never
+                # prevents the AMD/WMI fallback from running.
+                $gpuListJson = "[]"
+                $gpuItems = [System.Collections.Generic.List[string]]::new()
+                # Try nvidia-smi (NVIDIA GPUs)
+                $nvOut = $null
+                try { $nvOut = & nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits 2>$null } catch {}
+                try {
+                    if ($nvOut) {
+                        $idx = 0
+                        foreach ($nvLine in ($nvOut -split "`r?`n")) {
+                            $nvLine = $nvLine.Trim()
+                            if ($nvLine -match '^\d+') {
+                                $parts = $nvLine -split ',\s*', 2
+                                $vmb   = [int]$parts[0].Trim()
+                                $gname = if ($parts.Count -gt 1) { ($parts[1].Trim() -replace '"',"'") } else { "NVIDIA GPU $idx" }
+                                # Per-GPU rec intensity based on its own VRAM
+                                $gRec = 8
+                                if ($vmb -gt 0) {
+                                    $gt = [double]$vmb * 1048576.0 * 0.75
+                                    $ge = [Math]::Floor([Math]::Log($gt / 131072.0) / [Math]::Log(2.0))
+                                    if ($ge -lt 14) { $ge = 14 }
+                                    $gRec = [int][Math]::Floor(($ge - 13.5) * 100.0 / 6.0 - 0.001)
+                                    if ($gRec -lt 5)  { $gRec = 5 }
+                                    if ($gRec -gt 95) { $gRec = 95 }
+                                }
+                                $gpuItems.Add('{"index":' + $idx + ',"name":"' + $gname + '","vram_mb":' + $vmb + ',"rec_intensity":' + $gRec + ',"vendor":"nvidia"}')
+                                $idx++
+                            }
+                        }
+                    }
+                } catch {}
+                # AMD / Intel fallback via WMI (own try-catch so nvidia failure can't block it)
+                if ($gpuItems.Count -eq 0) { try {
+                    $idx = 0
+                    foreach ($wg in (Get-WmiObject Win32_VideoController | Where-Object { $_.AdapterRAM -gt 1073741824 } | Sort-Object AdapterRAM -Descending)) {
+                        $vmb   = [int]($wg.AdapterRAM / 1MB)
+                        $gname = ($wg.Name -replace '"',"'")
+                        $vendor = if ($gname -match "NVIDIA") { "nvidia" } elseif ($gname -match "AMD|Radeon") { "amd" } else { "unknown" }
+                        $gRec = 8
+                        if ($vmb -gt 0) {
+                            $gt = [double]$vmb * 1048576.0 * 0.75
+                            $ge = [Math]::Floor([Math]::Log($gt / 131072.0) / [Math]::Log(2.0))
+                            if ($ge -lt 14) { $ge = 14 }
+                            $gRec = [int][Math]::Floor(($ge - 13.5) * 100.0 / 6.0 - 0.001)
+                            if ($gRec -lt 5)  { $gRec = 5 }
+                            if ($gRec -gt 95) { $gRec = 95 }
+                        }
+                        $gpuItems.Add('{"index":' + $idx + ',"name":"' + $gname + '","vram_mb":' + $vmb + ',"rec_intensity":' + $gRec + ',"vendor":"' + $vendor + '"}')
+                        $idx++
+                    }
+                } catch {} }
+                if ($gpuItems.Count -gt 0) { $gpuListJson = '[' + ($gpuItems -join ',') + ']' }
+
+                $intensityJson = if ($gpuIntensity -match '^\d') { $gpuIntensity } else { '"' + $gpuIntensity + '"' }
+                $deviceJson    = '"' + ($gpuDevice -replace '"',"'") + '"'
+                $script:_GpuStatsCache = ('{"gpu_enabled":' + $enabledStr +
+                    ',"gpu_intensity":' + $intensityJson +
+                    ',"gpu_throttle":' + $gpuThrottle +
+                    ',"gpu_platform":' + $gpuPlatform +
+                    ',"gpu_device":' + $deviceJson +
+                    ',"gpu_vram_mb":' + $gpuVramMb +
+                    ',"gpu_rec_intensity":' + $gpuRecInt +
+                    ',"gpus":' + $gpuListJson + '}')
                 break
             }
             "/open-logs" {
@@ -823,9 +905,133 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                 break
             }
             "/sysinfo" {
-                # Background RunSpace keeps this warm — never blocks the main loop
-                $json = $script:Cache['Sysinfo']
+                # Background job (separate process) writes this every 4 s — main loop never blocks
+                $json = if (Test-Path $script:SysinfoFile) {
+                    try { [System.IO.File]::ReadAllText($script:SysinfoFile) } catch { $null }
+                } else { $null }
                 Send-Response $ctx $(if ($json) { $json } else { '{"cpu_usage":0,"mem_used_mb":0,"mem_total_mb":0,"gpu_usage":0,"gpus":[]}' })
+                break
+            }
+            "/_sysinfo-old" {
+                $out = @{}
+
+                # CPU usage — 2-second cap so a slow WMI call never blocks the server
+                try {
+                    $load = (Get-CimInstance Win32_Processor -OperationTimeoutSec 2 | Measure-Object -Property LoadPercentage -Average).Average
+                    $out["cpu_usage"] = [math]::Round([double]$load, 1)
+                } catch {}
+
+                # Memory
+                try {
+                    $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 2
+                    $out["mem_used_mb"]  = [math]::Round(($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / 1024)
+                    $out["mem_total_mb"] = [math]::Round($os.TotalVisibleMemorySize / 1024)
+                } catch {}
+
+                # Temperatures via LibreHardwareMonitor WMI
+                try {
+                    $lhmSensors = Get-CimInstance -Namespace root/OpenHardwareMonitor -ClassName Sensor -OperationTimeoutSec 2 -ErrorAction Stop |
+                                  Where-Object { $_.SensorType -eq "Temperature" }
+                    if ($lhmSensors) {
+                        $cpuPkg = $lhmSensors | Where-Object { $_.Name -match "CPU Package|CPU Tdie|Tdie|Package" } | Select-Object -First 1
+                        if (-not $cpuPkg) { $cpuPkg = $lhmSensors | Where-Object { $_.Identifier -match "/cpu/" } | Select-Object -First 1 }
+                        if ($cpuPkg) { $out["cpu_temp"] = [math]::Round([double]$cpuPkg.Value, 1) }
+
+                        $gpuTemp = $lhmSensors | Where-Object { $_.Identifier -match "/gpu" -and $_.Name -match "GPU Core|GPU Temperature|Temperature" } | Select-Object -First 1
+                        if ($gpuTemp) { $out["gpu_temp"] = [math]::Round([double]$gpuTemp.Value, 1) }
+                    }
+                } catch {}
+
+                # CPU temperature fallback
+                if (-not $out.ContainsKey("cpu_temp")) {
+                    try {
+                        $zones = Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature -OperationTimeoutSec 2 -ErrorAction Stop
+                        $temps = @($zones | ForEach-Object { ($_.CurrentTemperature - 2732) / 10.0 })
+                        if ($temps.Count -gt 0) {
+                            $out["cpu_temp"] = [math]::Round(($temps | Measure-Object -Maximum).Maximum, 1)
+                        }
+                    } catch {}
+                }
+
+                # NVIDIA GPU(s) — enumerate all cards, not just the first
+                $gpusSysinfo = [System.Collections.Generic.List[string]]::new()
+                if (-not $out.ContainsKey("gpu_temp")) { try {
+                    $nvPaths = @(
+                        "nvidia-smi",
+                        "C:\Windows\System32\nvidia-smi.exe",
+                        "C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+                        (Join-Path $env:ProgramFiles "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+                    )
+                    $nvExe = $nvPaths | Where-Object { Test-Path $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+                    if (-not $nvExe) {
+                        $nvExe = Get-ChildItem "$env:SystemRoot\System32\nvidia-smi.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+                    }
+                    if ($nvExe) {
+                        $nv = & $nvExe --query-gpu=temperature.gpu,utilization.gpu,name --format=csv,noheader,nounits 2>$null
+                        if ($nv) {
+                            $gIdx = 0
+                            foreach ($nvLine in ($nv -split "`r?`n")) {
+                                $nvLine = $nvLine.Trim()
+                                if (-not $nvLine) { continue }
+                                $p = $nvLine -split ',\s*'
+                                if ($p.Count -ge 3) {
+                                    $gTemp  = [double]$p[0].Trim()
+                                    $gUsage = [double]$p[1].Trim()
+                                    $gName  = ($p[2].Trim() -replace '"',"'")
+                                    # Primary card fields (first GPU — backward compat)
+                                    if ($gIdx -eq 0) {
+                                        $out["gpu_temp"]   = $gTemp
+                                        $out["gpu_usage"]  = $gUsage
+                                        $out["gpu_name"]   = $p[2].Trim()
+                                        $out["gpu_vendor"] = "nvidia"
+                                    }
+                                    $gpusSysinfo.Add('{"index":' + $gIdx + ',"temp":' + $gTemp + ',"usage":' + $gUsage + ',"name":"' + $gName + '","vendor":"nvidia"}')
+                                    $gIdx++
+                                }
+                            }
+                        }
+                    }
+                } catch {} }
+
+                # GPU name + vendor via WMI
+                if (-not $out.ContainsKey("gpu_name")) {
+                    try {
+                        $gpu = Get-CimInstance Win32_VideoController -OperationTimeoutSec 2 | Select-Object -First 1
+                        if ($gpu) {
+                            $out["gpu_name"] = $gpu.Name
+                            if ($gpu.Name -match "NVIDIA") { $out["gpu_vendor"] = "nvidia" }
+                            elseif ($gpu.Name -match "AMD|Radeon") { $out["gpu_vendor"] = "amd" }
+                            else { $out["gpu_vendor"] = "unknown" }
+                        }
+                    } catch {}
+                }
+
+                # GPU usage fallback via Windows perf counters — run in a background job with a
+                # 2-second timeout so a slow counter never blocks the synchronous request loop.
+                if (-not $out.ContainsKey("gpu_usage")) {
+                    try {
+                        $gpuJob = Start-Job {
+                            $s = Get-Counter '\GPU Engine(*engtype_3D*)\Utilization Percentage' -ErrorAction Stop
+                            ($s.CounterSamples | Measure-Object -Property CookedValue -Sum).Sum
+                        }
+                        $null = $gpuJob | Wait-Job -Timeout 2
+                        if ($gpuJob.State -eq 'Completed') {
+                            $usage = Receive-Job $gpuJob -ErrorAction SilentlyContinue
+                            if ($null -ne $usage) { $out["gpu_usage"] = [math]::Round([double]$usage, 1) }
+                        }
+                        Remove-Job $gpuJob -Force
+                    } catch {}
+                }
+
+                $kvs = @()
+                foreach ($k in $out.Keys) {
+                    $v = $out[$k]
+                    if ($v -is [string]) { $kvs += ('"' + $k + '":"' + ($v.Replace('\','\\').Replace('"','\"')) + '"') }
+                    else                 { $kvs += ('"' + $k + '":' + $v) }
+                }
+                # Append per-GPU array so the dashboard can show per-card stats
+                $gpusSysinfoJson = if ($gpusSysinfo.Count -gt 0) { '[' + ($gpusSysinfo -join ',') + ']' } else { '[]' }
+                $kvs += '"gpus":' + $gpusSysinfoJson
                 break
             }
             "/metrics" {
@@ -1193,8 +1399,10 @@ if ($script:PendingRestart) {
     Write-Log "Control server respawn initiated."
 }
 
-# Stop background cache refresher
-if ($script:CachePS) { try { $script:CachePS.Stop(); $script:CachePS.Dispose() } catch {} }
-if ($script:CacheRS) { try { $script:CacheRS.Close() } catch {} }
+# Stop background cache refresh job
+if ($script:CacheJob) {
+    Stop-Job  $script:CacheJob -ErrorAction SilentlyContinue
+    Remove-Job $script:CacheJob -Force -ErrorAction SilentlyContinue
+}
 
 Write-Log "Control server stopped."
