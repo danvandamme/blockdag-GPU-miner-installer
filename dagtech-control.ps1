@@ -280,12 +280,15 @@ function Send-Response {
         $res.Headers["Access-Control-Allow-Origin"]  = "*"
         $res.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         $res.Headers["Access-Control-Allow-Headers"] = "Content-Type"
+        $res.Headers["Connection"] = "close"   # release socket immediately; prevents CLOSE_WAIT buildup
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
         $res.ContentLength64 = $bytes.Length
         $res.OutputStream.Write($bytes, 0, $bytes.Length)
         $res.OutputStream.Flush()
         $res.Close()
-    } catch { }
+    } catch {
+        try { $ctx.Response.Abort() } catch { }  # force-release socket if client disconnected first
+    }
 }
 
 # Watchdog — checked inline on the main thread after each request (no threading issues)
@@ -296,6 +299,15 @@ $script:WatchdogRestarts   = 0       # attempt count; resets when miner comes ba
 
 # Detect GPU VRAM and cache recommended intensity to config (runs once; no-op if already cached)
 $null = Detect-GpuVram
+
+# Response caches for slow endpoints (nvidia-smi / WMI take 1-3 s each).
+# Results are reused for up to 4 seconds so simultaneous dashboard polls never
+# queue behind each other and CLOSE_WAIT sockets stop accumulating.
+$script:_SysinfoCache  = $null
+$script:_SysinfoTs     = [datetime]::MinValue
+$script:_GpuStatsCache = $null
+$script:_GpuStatsTs    = [datetime]::MinValue
+$script:_CacheTtlSecs  = 4
 
 # Start listener
 $listener = New-Object System.Net.HttpListener
@@ -454,6 +466,10 @@ while ($listener.IsListening) {
                 break
             }
             "/gpu-stats" {
+                # Return cached result if fresh enough — nvidia-smi takes ~1 s per call
+                if ($script:_GpuStatsCache -and ([datetime]::UtcNow - $script:_GpuStatsTs).TotalSeconds -lt $script:_CacheTtlSecs) {
+                    Send-Response $ctx $script:_GpuStatsCache; break
+                }
                 $cfg = Read-Config
                 $gpuEnabled  = if ($cfg["GPU_ENABLED"])       { $cfg["GPU_ENABLED"] -eq "1" }  else { $false }
                 $gpuIntensity= if ($cfg["GPU_INTENSITY"])     { $cfg["GPU_INTENSITY"] }          else { "80" }
@@ -523,7 +539,7 @@ while ($listener.IsListening) {
 
                 $intensityJson = if ($gpuIntensity -match '^\d') { $gpuIntensity } else { '"' + $gpuIntensity + '"' }
                 $deviceJson    = '"' + ($gpuDevice -replace '"',"'") + '"'
-                Send-Response $ctx ('{"gpu_enabled":' + $enabledStr +
+                $script:_GpuStatsCache = ('{"gpu_enabled":' + $enabledStr +
                     ',"gpu_intensity":' + $intensityJson +
                     ',"gpu_throttle":' + $gpuThrottle +
                     ',"gpu_platform":' + $gpuPlatform +
@@ -531,6 +547,8 @@ while ($listener.IsListening) {
                     ',"gpu_vram_mb":' + $gpuVramMb +
                     ',"gpu_rec_intensity":' + $gpuRecInt +
                     ',"gpus":' + $gpuListJson + '}')
+                $script:_GpuStatsTs = [datetime]::UtcNow
+                Send-Response $ctx $script:_GpuStatsCache
                 break
             }
             "/open-logs" {
@@ -670,6 +688,10 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                 break
             }
             "/sysinfo" {
+                # Return cached result if fresh enough — WMI + nvidia-smi take 2-3 s combined
+                if ($script:_SysinfoCache -and ([datetime]::UtcNow - $script:_SysinfoTs).TotalSeconds -lt $script:_CacheTtlSecs) {
+                    Send-Response $ctx $script:_SysinfoCache; break
+                }
                 $out = @{}
 
                 # CPU usage — 2-second cap so a slow WMI call never blocks the server
@@ -789,7 +811,9 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                 # Append per-GPU array so the dashboard can show per-card stats
                 $gpusSysinfoJson = if ($gpusSysinfo.Count -gt 0) { '[' + ($gpusSysinfo -join ',') + ']' } else { '[]' }
                 $kvs += '"gpus":' + $gpusSysinfoJson
-                Send-Response $ctx ('{' + ($kvs -join ',') + '}')
+                $script:_SysinfoCache = '{' + ($kvs -join ',') + '}'
+                $script:_SysinfoTs    = [datetime]::UtcNow
+                Send-Response $ctx $script:_SysinfoCache
                 break
             }
             "/metrics" {
@@ -1092,6 +1116,7 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
         break
     } catch {
         Write-Log "Request error: $_"
+        try { $ctx.Response.Abort() } catch { }  # release socket on unhandled error
     }
 
     # Inline watchdog: runs on the main thread every 30 s — no threading issues
