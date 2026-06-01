@@ -651,7 +651,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$desk=[Environment]::GetFolderPath('Desktop');" ^
     "$folder=Join-Path $desk 'Miner Shortcuts';" ^
     "if (-not (Test-Path $folder)){ New-Item -ItemType Directory -Path $folder | Out-Null };" ^
-    "@('DagTech GPU Miner.lnk','DagTech GPU Miner - Stop.lnk','DagTech GPU Miner - Uninstall.lnk','DagTech GPU Miner - Logs.lnk','DagTech GPU Miner - Restart Control.lnk') | ForEach-Object { $old=Join-Path $desk $_; if (Test-Path $old){ Remove-Item $old -Force } }"
+    "@('DagTech GPU Miner.lnk','DagTech GPU Miner - Stop.lnk','DagTech GPU Miner - Uninstall.lnk','DagTech GPU Miner - Logs.lnk','DagTech GPU Miner - Restart Control.lnk','DagTech GPU Miner - Force Stop.lnk') | ForEach-Object { $old=Join-Path $desk $_; if (Test-Path $old){ Remove-Item $old -Force } }"
 echo [GPU Miner] Shortcut folder ready: "Miner Shortcuts"
 
 REM -- Start shortcut --
@@ -678,6 +678,11 @@ REM -- Restart Control shortcut --
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$d=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Miner Shortcuts'; $lnk=Join-Path $d 'DagTech GPU Miner - Restart Control.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-restart-control.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Restart DagTech GPU Miner control server'; $s.IconLocation='%BIN_DIR%\logo.ico,0'; $s.Save()"
 if not errorlevel 1 echo [GPU Miner] Shortcut created: "DagTech GPU Miner - Restart Control"
+
+REM -- Force Stop shortcut --
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$d=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Miner Shortcuts'; $lnk=Join-Path $d 'DagTech GPU Miner - Force Stop.lnk'; $s=(New-Object -COM WScript.Shell).CreateShortcut($lnk); $s.TargetPath='%BIN_DIR%\dagtech-force-stop.bat'; $s.WorkingDirectory='%BIN_DIR%'; $s.Description='Force stop DagTech GPU Miner (kills all processes)'; $s.IconLocation='%BIN_DIR%\logo.ico,0'; $s.Save()"
+if not errorlevel 1 echo [GPU Miner] Shortcut created: "DagTech GPU Miner - Force Stop"
 
 REM ============================================================================
 REM 12. Auto-start via Task Scheduler
@@ -756,10 +761,12 @@ echo     DagTech GPU Miner Installation Complete!
 echo   =====================================================
 echo.
 echo   Shortcuts in "Miner Shortcuts" folder on your Desktop:
-echo     "DagTech GPU Miner"             - starts mining
-echo     "DagTech GPU Miner - Stop"      - stops mining
-echo     "DagTech GPU Miner - Logs"      - view live log in terminal
-echo     "DagTech GPU Miner - Uninstall" - removes miner completely
+echo     "DagTech GPU Miner"                  - starts mining
+echo     "DagTech GPU Miner - Stop"           - stops mining
+echo     "DagTech GPU Miner - Force Stop"     - kills all processes (use if Stop hangs)
+echo     "DagTech GPU Miner - Logs"           - view live log in terminal
+echo     "DagTech GPU Miner - Restart Control"- restart control server (applies updates)
+echo     "DagTech GPU Miner - Uninstall"      - removes miner completely
 echo.
 echo   Dashboard (while mining):
 echo     http://127.0.0.1:8883
