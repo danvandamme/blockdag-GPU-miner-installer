@@ -79,14 +79,19 @@ REM ============================================================================
 if exist "C:\dagtech-gpu-miner\logs\control.pid" (
     set /p CTRLPID=<"C:\dagtech-gpu-miner\logs\control.pid"
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$p = Get-Process -Id %CTRLPID% -ErrorAction SilentlyContinue;" ^
-        "if ($p -and $p.Name -in 'powershell','pwsh') {" ^
-        "    Stop-Process -Id %CTRLPID% -Force -ErrorAction SilentlyContinue;" ^
-        "    Write-Host '  [OK] Killed PID %CTRLPID% from pid file'" ^
-        "} elseif ($p) {" ^
-        "    Write-Host ('  [--] PID %CTRLPID% is ' + $p.Name + ' - not a PowerShell process, skipping')" ^
+        "$pidRaw = '%CTRLPID%'.Trim();" ^
+        "if ($pidRaw -match '^\d+$') {" ^
+        "    $p = Get-Process -Id ([int]$pidRaw) -ErrorAction SilentlyContinue;" ^
+        "    if ($p -and $p.Name -in 'powershell','pwsh') {" ^
+        "        Stop-Process -Id ([int]$pidRaw) -Force -ErrorAction SilentlyContinue;" ^
+        "        Write-Host ('  [OK] Killed PID ' + $pidRaw + ' from pid file')" ^
+        "    } elseif ($p) {" ^
+        "        Write-Host ('  [--] PID ' + $pidRaw + ' is ' + $p.Name + ' - not a PowerShell process, skipping')" ^
+        "    } else {" ^
+        "        Write-Host ('  [--] PID ' + $pidRaw + ' from pid file is already gone')" ^
+        "    }" ^
         "} else {" ^
-        "    Write-Host '  [--] PID %CTRLPID% from pid file is already gone'" ^
+        "    Write-Host '  [--] PID file is empty or invalid - skipping'" ^
         "}"
     del "C:\dagtech-gpu-miner\logs\control.pid" >nul 2>&1
 )
