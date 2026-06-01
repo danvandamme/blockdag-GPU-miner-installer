@@ -213,7 +213,10 @@ function Get-MinerProcess {
 function Build-MinerArgList([hashtable]$cfg) {
     $argList = [System.Collections.Generic.List[string]]::new()
     $argList.AddRange([string[]]@(
-        "--wallet",       $(if ($cfg["WALLET"])      { $cfg["WALLET"] }      else { "" }),
+        "--wallet",       $(if ($cfg["WALLET"]) {
+                              $wn = if ($cfg["WORKER_NAME"]) { $cfg["WORKER_NAME"] } else { "" }
+                              if ($wn) { "$($cfg['WALLET']).$wn" } else { $cfg["WALLET"] }
+                          } else { "" }),
         "--pool",         $(if ($cfg["POOL_HOST"])   { $cfg["POOL_HOST"] }   else { "" }),
         "--port",         $(if ($cfg["POOL_PORT"])   { $cfg["POOL_PORT"] }   else { "3334" }),
         "--threads",      $(if ($cfg["THREADS"])     { $cfg["THREADS"] }     else { "1" }),
