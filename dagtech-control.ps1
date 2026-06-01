@@ -253,6 +253,8 @@ function Start-MinerProcess {
     if ($proc) {
         try { "$($proc.Id)" | Out-File $script:MINERPIDF -Encoding ASCII -Force } catch {}
         Write-Log "GPU miner started (PID $($proc.Id))"
+        $script:MinerStartedAt       = [datetime]::UtcNow
+        $script:GpuPlatformCheckDone = $false
     }
 }
 
@@ -299,6 +301,8 @@ $script:LastWatchdog       = [datetime]::UtcNow
 $script:MinerDownSince     = $null   # set when miner is first detected as not running
 $script:LastRestartAttempt = $null   # set after each restart attempt
 $script:WatchdogRestarts   = 0       # attempt count; resets when miner comes back up
+$script:MinerStartedAt          = $null   # set in Start-MinerProcess; used by GPU platform check
+$script:GpuPlatformCheckDone    = $false  # reset on each miner start; prevents repeated checks
 
 # Detect GPU VRAM and cache recommended intensity to config (runs once; no-op if already cached)
 $null = Detect-GpuVram
@@ -1357,6 +1361,56 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                 $script:MinerDownSince     = $null
                 $script:LastRestartAttempt = $null
                 $script:WatchdogRestarts   = 0
+
+                # ── GPU platform auto-detect ──────────────────────────────────────────
+                # If GPU mining shows 0 H/s 90 s after start, try GPU_PLATFORM=1.
+                # Only runs once per miner start and only bumps from 0 → 1 (never loops).
+                if (-not $script:GpuPlatformCheckDone -and
+                    $null -ne $script:MinerStartedAt -and
+                    ([datetime]::UtcNow - $script:MinerStartedAt).TotalSeconds -ge 90) {
+
+                    $script:GpuPlatformCheckDone = $true   # mark now; prevents re-entry
+                    $gpuCfg = Read-Config
+                    $curPlatform = try { [int]($gpuCfg["GPU_PLATFORM"] ?? 0) } catch { 0 }
+
+                    if ($gpuCfg["GPU_ENABLED"] -eq "1" -and $curPlatform -eq 0) {
+                        # Parse the last GPU stats line from the miner log
+                        $logFile  = Get-ActiveMinerLog
+                        $gpuHash  = -1.0   # -1 = not found; 0 = found but zero
+                        $cpuHash  = 0.0
+                        if ($logFile -and (Test-Path $logFile)) {
+                            $logLines = Get-Content $logFile -Tail 80 -ErrorAction SilentlyContinue
+                            $statsLine = $logLines | Where-Object {
+                                $_ -match '\[DagTech\].*\|\s+CPU:\s+[\d.]+\s+H/s\s+\|\s+GPU:\s+[\d.]+\s+H/s'
+                            } | Select-Object -Last 1
+                            if ($statsLine -match '\[DagTech\].*\|\s+CPU:\s+([\d.]+)\s+H/s\s+\|\s+GPU:\s+([\d.]+)\s+H/s') {
+                                $cpuHash = [double]$Matches[1]
+                                $gpuHash = [double]$Matches[2]
+                            }
+                        }
+
+                        if ($gpuHash -eq 0 -and $cpuHash -gt 0) {
+                            Write-Log "Watchdog: GPU hashrate is 0 H/s after 90s (CPU is running) — switching to GPU_PLATFORM=1 and restarting."
+                            # Update GPU_PLATFORM in config.env
+                            $cfgLines = @(Get-Content $script:CONFIG -ErrorAction SilentlyContinue)
+                            $keyFound = $false
+                            $newCfgLines = @($cfgLines | ForEach-Object {
+                                if ($_ -match '^GPU_PLATFORM=') { $keyFound = $true; "GPU_PLATFORM=1" } else { $_ }
+                            })
+                            if (-not $keyFound) { $newCfgLines += "GPU_PLATFORM=1" }
+                            [System.IO.File]::WriteAllLines($script:CONFIG, $newCfgLines, (New-Object System.Text.UTF8Encoding $false))
+                            # Restart the miner with the new platform
+                            $minerProc = Get-MinerProcess
+                            if ($minerProc) { $minerProc | Stop-Process -Force -ErrorAction SilentlyContinue }
+                            Start-Sleep -Milliseconds 1200
+                            $script:GpuPlatformCheckDone = $false   # let the check run again for the new instance
+                            Start-MinerProcess
+                        } elseif ($gpuHash -gt 0) {
+                            Write-Log "Watchdog: GPU platform check OK — GPU running at $gpuHash H/s on platform $curPlatform."
+                        }
+                        # If $gpuHash -eq -1 (no stats line yet), check is already marked done — will re-run next start
+                    }
+                }
             } else {
                 # Miner is not running — start or continue timing
                 if ($null -eq $script:MinerDownSince) {
