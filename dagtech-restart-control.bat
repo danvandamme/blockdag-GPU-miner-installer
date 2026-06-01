@@ -54,14 +54,19 @@ REM ============================================================================
 if exist "C:\dagtech-gpu-miner\logs\control.pid" (
     set /p CTRLPID=<"C:\dagtech-gpu-miner\logs\control.pid"
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$p = Get-Process -Id %CTRLPID% -ErrorAction SilentlyContinue;" ^
-        "if ($p -and $p.Name -in 'powershell','pwsh') {" ^
-        "    Stop-Process -Id %CTRLPID% -Force -ErrorAction SilentlyContinue;" ^
-        "    Write-Host '  [OK] Killed PID %CTRLPID% from pid file'" ^
-        "} elseif ($p) {" ^
-        "    Write-Host ('  [--] PID %CTRLPID% is ' + $p.Name + ' - not PowerShell, skipping')" ^
+        "$pidRaw = '%CTRLPID%'.Trim();" ^
+        "if ($pidRaw -match '^\d+$') {" ^
+        "    $p = Get-Process -Id ([int]$pidRaw) -ErrorAction SilentlyContinue;" ^
+        "    if ($p -and $p.Name -in 'powershell','pwsh') {" ^
+        "        Stop-Process -Id ([int]$pidRaw) -Force -ErrorAction SilentlyContinue;" ^
+        "        Write-Host ('  [OK] Killed PID ' + $pidRaw + ' from pid file')" ^
+        "    } elseif ($p) {" ^
+        "        Write-Host ('  [--] PID ' + $pidRaw + ' is ' + $p.Name + ' - not PowerShell, skipping')" ^
+        "    } else {" ^
+        "        Write-Host ('  [--] PID ' + $pidRaw + ' from pid file is already gone')" ^
+        "    }" ^
         "} else {" ^
-        "    Write-Host '  [--] PID %CTRLPID% from pid file is already gone'" ^
+        "    Write-Host '  [--] PID file is empty or invalid - skipping'" ^
         "}"
     del "C:\dagtech-gpu-miner\logs\control.pid" >nul 2>&1
 )
@@ -103,16 +108,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "            Where-Object { $_.Name -in 'powershell.exe','pwsh.exe' -and $_.CommandLine -like '*dagtech-control*' };" ^
     "};" ^
     "if ($proc) {" ^
-    "    $pid = ($proc | Select-Object -First 1 -ExpandProperty ProcessId);" ^
+    "    $ctrlPid = ($proc | Select-Object -First 1 -ExpandProperty ProcessId);" ^
     "    $ok = $false;" ^
     "    try {" ^
     "        $r = [System.Net.WebRequest]::Create('http://127.0.0.1:8883/status');" ^
     "        $r.Timeout = 3000; $r.GetResponse().Close(); $ok = $true" ^
     "    } catch {}" ^
     "    if ($ok) {" ^
-    "        Write-Host ('  [OK] Control server running and responding (PID ' + $pid + ')') -ForegroundColor Green" ^
+    "        Write-Host ('  [OK] Control server running and responding (PID ' + $ctrlPid + ')') -ForegroundColor Green" ^
     "    } else {" ^
-    "        Write-Host ('  [OK] Control server process running (PID ' + $pid + ') - still starting up') -ForegroundColor Green" ^
+    "        Write-Host ('  [OK] Control server process running (PID ' + $ctrlPid + ') - still starting up') -ForegroundColor Green" ^
     "    }" ^
     "} else {" ^
     "    Write-Host '  [WARN] Process not found after 10 s - check the miner logs.' -ForegroundColor Red;" ^
