@@ -1371,7 +1371,7 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
 
                     $script:GpuPlatformCheckDone = $true   # mark now; prevents re-entry
                     $gpuCfg = Read-Config
-                    $curPlatform = try { [int]($gpuCfg["GPU_PLATFORM"] ?? 0) } catch { 0 }
+                    $curPlatform = if ($gpuCfg["GPU_PLATFORM"]) { try { [int]$gpuCfg["GPU_PLATFORM"] } catch { 0 } } else { 0 }
 
                     if ($gpuCfg["GPU_ENABLED"] -eq "1" -and $curPlatform -eq 0) {
                         # Parse the last GPU stats line from the miner log
