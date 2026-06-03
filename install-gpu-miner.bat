@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0601.7"
+set "VERSION=GPU-2026.0601.8"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -505,22 +505,28 @@ REM 4b. Stop any running miner BEFORE touching the binary
 REM     (dagtech-gpu-miner.exe is locked while running; copy silently fails)
 REM ============================================================================
 echo [GPU Miner] Force-stopping any running miner instance...
-REM Run the Force Stop script if it exists (ensures HTTP.sys, PID file, and all
-REM orphaned processes are fully cleared before we copy new files over them).
-if exist "%BIN_DIR%\dagtech-force-stop.bat" (
-    call "%BIN_DIR%\dagtech-force-stop.bat" >nul 2>&1
-) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Disable-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue | Out-Null;" ^
-        "Stop-ScheduledTask   -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
-        "$pidFile='%INSTALL_DIR%\logs\control.pid';" ^
-        "if (Test-Path $pidFile) { $raw=(Get-Content $pidFile -Raw).Trim(); if ($raw -match '^\d+$') { try { Get-Process -Id ([int]$raw) -EA Stop | Stop-Process -Force } catch {} } };" ^
-        "Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue;" ^
-        "Get-CimInstance Win32_Process -Filter ""Name='powershell.exe'"" | Where-Object { $_.CommandLine -like '*dagtech-control*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue };" ^
-        "netsh http delete urlacl url=http://127.0.0.1:8883/ | Out-Null;" ^
-        "Start-Sleep -Seconds 1" 2>nul
-)
+REM Inline, non-interactive force stop. We do NOT call dagtech-force-stop.bat
+REM here because that is a standalone tool that self-elevates and ends with a
+REM pause prompt — calling it would hang the installer. This replicates its
+REM kill sequence: task stop, miner kill, orphaned control-server kill, and
+REM HTTP.sys reservation release so the new files copy and bind cleanly.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "Disable-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue | Out-Null;" ^
+    "Stop-ScheduledTask   -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
+    "$pidFile='%INSTALL_DIR%\logs\control.pid';" ^
+    "if (Test-Path $pidFile) { $raw=(Get-Content $pidFile -Raw).Trim(); if ($raw -match '^\d+$') { try { Get-Process -Id ([int]$raw) -EA Stop | Stop-Process -Force } catch {} } };" ^
+    "Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue;" ^
+    "Get-CimInstance Win32_Process -Filter ""Name='powershell.exe'"" | Where-Object { $_.CommandLine -like '*dagtech-control*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue };" ^
+    "Get-CimInstance Win32_Process -Filter ""Name='pwsh.exe'"" | Where-Object { $_.CommandLine -like '*dagtech-control*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue };" ^
+    "netsh http delete urlacl url=http://127.0.0.1:8883/ | Out-Null;" ^
+    "Start-Sleep -Seconds 1" 2>nul
 echo [GPU Miner] Miner stopped.
+
+REM Re-enable the scheduled task (force-stop disables it; we need it enabled so
+REM the new install's auto-start works). Task registration later re-creates it
+REM anyway, but enabling here keeps state clean if registration is skipped.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "Enable-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue | Out-Null" >nul 2>&1
 
 REM ============================================================================
 REM 5. Create directories
