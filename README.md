@@ -102,13 +102,19 @@ Open `C:\dagtech-gpu-miner\config.env` in Notepad to edit settings. Restart the 
 
 ---
 
-### "No OpenCL platforms found" — NVIDIA
+### "No OpenCL platforms found" — NVIDIA or AMD
 
-The registry entry that points OpenCL to the NVIDIA driver is missing. This can happen after a driver update or clean Windows install.
+**What this means:** OpenCL is the GPU compute API the miner uses to talk to your graphics card. Windows maintains a registry list at `HKEY_LOCAL_MACHINE\SOFTWARE\Khronos\OpenCL\Vendors` that tells the OpenCL loader which driver DLLs to use. If a GPU driver was installed or updated without correctly writing to this list, the loader finds nothing — and the miner reports "No OpenCL platforms found" and GPU hashrate stays at 0.
 
-**Fix — PowerShell (recommended):**
+**The installer tries to fix this automatically.** If you are still seeing the problem, follow the steps below.
 
-Run in an elevated PowerShell window:
+---
+
+#### NVIDIA — manual fix
+
+The NVIDIA OpenCL library is `nvopencl64.dll`, stored inside the driver's DriverStore folder. Its exact path changes with every driver version, which is why a static registry file cannot be shipped — it must be detected at runtime.
+
+**Fix — PowerShell (run as Administrator):**
 
 ```powershell
 $dll = Get-ChildItem "C:\Windows\System32\DriverStore\FileRepository" `
@@ -124,33 +130,26 @@ if ($dll) {
 }
 ```
 
-**Fix — Manual (regedit):**
+**Fix — regedit (manual):**
 
-1. Open **regedit** as Administrator
-2. Navigate to `HKEY_LOCAL_MACHINE\SOFTWARE\Khronos\OpenCL\Vendors`
-   (create the `Khronos\OpenCL\Vendors` keys if they don't exist)
-3. Find your NVIDIA OpenCL DLL — look inside:
-   `C:\Windows\System32\DriverStore\FileRepository\` for a folder containing `nvopencl64.dll`
-4. Right-click `Vendors` → **New → DWORD (32-bit) Value**
-5. Set the **name** to the full DLL path
-6. Set the **value data** to `0`
-7. Restart the miner
+1. Open **File Explorer** and browse to `C:\Windows\System32\DriverStore\FileRepository\`
+2. Search for `nvopencl64.dll` — it will be inside a folder named something like `nvlt.inf_amd64_*`
+3. Copy the full path (e.g. `C:\Windows\System32\DriverStore\FileRepository\nvlt.inf_amd64_abc12345\nvopencl64.dll`)
+4. Open **regedit** as Administrator
+5. Navigate to `HKEY_LOCAL_MACHINE\SOFTWARE\Khronos\OpenCL\Vendors`  
+   (right-click and create the `Khronos`, `OpenCL`, and `Vendors` keys if they don't exist)
+6. Right-click `Vendors` → **New → DWORD (32-bit) Value**
+7. Paste the full DLL path as the **name**
+8. Leave the **value data** as `0`
+9. Restart the miner
 
 ---
 
-### "No OpenCL platforms found" — AMD
+#### AMD — manual fix
 
-The AMD OpenCL ICD is not registered. This usually means AMD drivers are not installed or were installed incorrectly.
+AMD's OpenCL library is `amdocl64.dll`. It may be in `System32` directly, or in DriverStore.
 
-**Fix — Install/reinstall AMD drivers:**
-
-1. Download AMD Radeon Software from **https://www.amd.com/support**
-2. Run the installer and select **Full Install**
-3. Reboot, then re-run `install-gpu-miner.bat`
-
-**Fix — Manual registry (if drivers are installed but OpenCL still missing):**
-
-Run in an elevated PowerShell window:
+**Fix — PowerShell (run as Administrator):**
 
 ```powershell
 $dll = Get-ChildItem "C:\Windows\System32" -Filter "amdocl64.dll" -ErrorAction SilentlyContinue |
@@ -169,6 +168,8 @@ if ($dll) {
     Write-Host "amdocl64.dll not found - reinstall AMD Radeon Software."
 }
 ```
+
+If `amdocl64.dll` is not found at all, install or reinstall AMD drivers from **https://www.amd.com/support** (choose **Full Install**), reboot, then re-run `install-gpu-miner.bat`.
 
 ---
 
