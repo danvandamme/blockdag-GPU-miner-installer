@@ -544,6 +544,12 @@
     </style>
 </head>
 <body>
+    <!-- Empty wallet warning banner -->
+    <div id="walletWarningBanner" style="display:none;position:sticky;top:0;z-index:90;background:#7c2d12;border-bottom:1px solid #ea580c;color:#fed7aa;font-size:13px;font-weight:500;padding:9px 18px;text-align:center;letter-spacing:0.01em;">
+        &#9888; <strong>Wallet address is not set.</strong>
+        Mining is disabled — shares will be rejected by the pool.
+        <a href="#" onclick="openConfig();return false;" style="color:#fdba74;margin-left:8px;text-decoration:underline;">Open Config to fix this</a>
+    </div>
     <div class="container">
         <!-- Header -->
         <div class="header">
@@ -1056,6 +1062,9 @@
                 els.walletAddr.textContent  = data.wallet;
                 els.walletAddr.title        = data.wallet;
             }
+            // Show/hide empty-wallet banner
+            const banner = document.getElementById('walletWarningBanner');
+            if (banner) banner.style.display = data.wallet ? 'none' : 'block';
 
             // Pool / node connection indicator
             const connDot = document.getElementById('poolConnDot');
@@ -2021,11 +2030,33 @@
         async function saveConfig() {
             const btn    = document.getElementById('btnSaveConfig');
             const status = document.getElementById('configStatus');
-            btn.disabled = true; btn.textContent = 'Saving...'; status.textContent = '';
+            status.textContent = '';
+
+            // Validate wallet before saving
+            const walletInput = document.getElementById('cfgWallet');
+            const walletVal   = walletInput.value.trim();
+            if (!walletVal) {
+                walletInput.style.outline = '2px solid #f87171';
+                walletInput.focus();
+                status.style.color   = '#f87171';
+                status.textContent   = 'Wallet address is required — mining will not work without it.';
+                setTimeout(() => { walletInput.style.outline = ''; }, 3000);
+                return;
+            }
+            if (!/^0x[0-9a-fA-F]{40}$/.test(walletVal)) {
+                walletInput.style.outline = '2px solid #fb923c';
+                walletInput.focus();
+                status.style.color   = '#fb923c';
+                status.textContent   = 'Wallet should be 0x followed by 40 hex characters.';
+                setTimeout(() => { walletInput.style.outline = ''; }, 3000);
+                return;
+            }
+
+            btn.disabled = true; btn.textContent = 'Saving...';
 
             const mode = document.querySelector('.mode-btn.active')?.dataset.mode || 'both';
             const cfg = {
-                WALLET:        document.getElementById('cfgWallet').value.trim(),
+                WALLET:        walletVal,
                 POOL_HOST:     document.getElementById('cfgPoolHost').value.trim(),
                 POOL_PORT:     document.getElementById('cfgPoolPort').value.trim(),
                 WORKER_NAME:   document.getElementById('cfgWorker').value.trim(),
