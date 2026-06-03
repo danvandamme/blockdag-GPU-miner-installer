@@ -817,5 +817,9 @@ echo.
 echo   DagTech GPU Mining Suite v%VERSION%
 echo   By Dawie Nel / DagTech Ltd  -  dagtech.network
 echo.
+echo   Full documentation (troubleshooting, config reference, updating):
+echo     https://github.com/danvandamme/blockdag-GPU-miner-installer#readme
+echo.
 echo   You can close this window now.
+start "" "https://github.com/danvandamme/blockdag-GPU-miner-installer#readme"
 pause >nul
