@@ -818,8 +818,13 @@ echo   DagTech GPU Mining Suite v%VERSION%
 echo   By Dawie Nel / DagTech Ltd  -  dagtech.network
 echo.
 echo   Full documentation (troubleshooting, config reference, updating):
-echo     https://github.com/danvandamme/blockdag-GPU-miner-installer#readme
+echo     %INSTALL_DIR%\README.html
 echo.
 echo   You can close this window now.
-start "" "https://github.com/danvandamme/blockdag-GPU-miner-installer#readme"
+if exist "%~dp0README.html" copy /y "%~dp0README.html" "%INSTALL_DIR%\README.html" >nul 2>&1
+if exist "%INSTALL_DIR%\README.html" (
+    start "" "%INSTALL_DIR%\README.html"
+) else (
+    start "" "https://github.com/danvandamme/blockdag-GPU-miner-installer#readme"
+)
 pause >nul
