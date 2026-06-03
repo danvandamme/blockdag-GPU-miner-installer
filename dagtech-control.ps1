@@ -318,6 +318,7 @@ $null = Detect-GpuVram
 # writes results to temp files. The main loop reads those files in < 1 ms.
 $script:SysinfoFile  = Join-Path $script:LOGDIR "sysinfo.cache.json"
 $script:GpuStatsFile = Join-Path $script:LOGDIR "gpustats.cache.json"
+$script:MetricsFile  = Join-Path $script:LOGDIR "metrics.cache.json"
 $script:CacheJob     = $null
 
 function Start-CacheRefresher {
@@ -328,7 +329,10 @@ function Start-CacheRefresher {
     }
 
     $script:CacheJob = Start-Job -ScriptBlock {
-        param($configPath, $siFile, $gsFile, $siTmp, $gsTmp)
+        param($configPath, $siFile, $gsFile, $siTmp, $gsTmp, $mFile, $mTmp, $logDir)
+
+        # ── Per-job state for metrics ──────────────────────────────────────────
+        $lastJobSeenAt = $null   # tracks when last "New job:" was seen in log
 
         function Get-SysinfoJson {
             $out = @{}
@@ -510,6 +514,112 @@ function Start-CacheRefresher {
                 ',"gpus":' + $gpuListJson + '}')
         }
 
+        function Get-MetricsJson {
+            param($configPath, $logDir)
+            $cfg = @{}
+            if (Test-Path $configPath) {
+                Get-Content $configPath | ForEach-Object {
+                    if ($_ -match '^([A-Z_]+)=(.*)$') { $cfg[$Matches[1]] = $Matches[2].Trim() }
+                }
+            }
+            $miningMode  = if ($cfg["MINING_MODE"]) { $cfg["MINING_MODE"] } else { "both" }
+            $metricsPort = if ($cfg["METRICS_PORT"]) { $cfg["METRICS_PORT"] } else { "8882" }
+
+            # Find active log file (today's if it has content, otherwise most recent)
+            $today   = Join-Path $logDir "miner_$(Get-Date -Format 'yyyy-MM-dd').log"
+            $logFile = if ((Test-Path $today) -and (Get-Item $today -EA SilentlyContinue).Length -ge 200) { $today } else {
+                Get-ChildItem $logDir -Filter "miner_*.log" -EA SilentlyContinue |
+                    Where-Object { $_.Name -match '^miner_\d{4}-\d{2}-\d{2}\.log$' -and $_.Length -ge 200 } |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+            }
+
+            # Is the miner process running?
+            $minerRunning = $null -ne (Get-Process -Name "dagtech-gpu-miner" -ErrorAction SilentlyContinue)
+
+            $out = @{
+                running       = $minerRunning
+                wallet        = if ($cfg["WALLET"])            { $cfg["WALLET"] }                              else { "" }
+                worker        = if ($cfg["WORKER_NAME"])       { $cfg["WORKER_NAME"] }                         else { "" }
+                pool          = if ($cfg["POOL_HOST"])         { "$($cfg['POOL_HOST']):$($cfg['POOL_PORT'])" }  else { "" }
+                threads       = if ($cfg["THREADS"])           { [int]$cfg["THREADS"] }                        else { 0 }
+                version       = if ($cfg["INSTALLER_VERSION"]) { $cfg["INSTALLER_VERSION"] }                   else { "" }
+                gpu_intensity = if ($cfg["GPU_INTENSITY"])     { [int]$cfg["GPU_INTENSITY"] }                   else { 80 }
+                gpu_throttle  = if ($cfg["GPU_THROTTLE"])      { [int]$cfg["GPU_THROTTLE"] }                    else { 100 }
+                mining_mode   = $miningMode
+                pool_status   = "unknown"
+                job_id        = ""
+                last_job_secs_ago = $null
+                hashrate         = 0.0
+                cpu_hashrate     = 0.0
+                gpu_hashrate     = 0.0
+                accepted         = 0; submitted = 0; rejected = 0; stale = 0
+                uptime           = 0; total_hashes = 0; difficulty = 0.0
+                cpu_shares_found = 0; gpu_shares_found = 0
+                cpu_submitted = 0; gpu_submitted = 0
+                cpu_accepted  = 0; gpu_accepted  = 0
+                cpu_rejected  = 0; gpu_rejected  = 0
+                cpu_stale     = 0; gpu_stale     = 0
+            }
+
+            if ($logFile -and (Test-Path $logFile)) {
+                try {
+                    $fs     = New-Object System.IO.FileStream($logFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    $reader = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+                    $content = $reader.ReadToEnd(); $reader.Close(); $fs.Close()
+                    $lines = $content -split "`r?`n"
+                    $out["cpu_shares_found"] = ($lines | Where-Object { $_ -match '\[DagTech\] \*\* SHARE FOUND \*\*' }).Count
+                    $out["gpu_shares_found"] = ($lines | Where-Object { $_ -match '\[DagTech GPU\] \*\* SHARE FOUND \*\*' }).Count
+                    $foundStats = $false; $foundDiff = $false; $foundJob = $false; $foundConn = $false
+                    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+                        if ($foundStats -and $foundDiff -and $foundJob -and $foundConn) { break }
+                        $line = $lines[$i]
+                        if (-not $foundStats -and $line -match '\[DagTech\]\s+([\d.]+)\s+H/s\s+\|\s+CPU:\s+([\d.]+)\s+H/s\s+\|\s+GPU:\s+([\d.]+)\s+H/s\s+\|\s+Shares:\s+(\d+)/(\d+)/(\d+)/(\d+).*Uptime:\s+(\d+)h(\d+)m') {
+                            $out["hashrate"]=$Matches[1]; $out["cpu_hashrate"]=$Matches[2]; $out["gpu_hashrate"]=$Matches[3]
+                            $out["submitted"]=[int]$Matches[4]; $out["accepted"]=[int]$Matches[5]; $out["rejected"]=[int]$Matches[6]; $out["stale"]=[int]$Matches[7]
+                            $us=[int]$Matches[8]*3600+[int]$Matches[9]*60; $out["uptime"]=$us; $out["total_hashes"]=[long]([double]$Matches[1]*$us); $foundStats=$true
+                        }
+                        if (-not $foundStats -and $line -match '\[DagTech\]\s+([\d.]+)\s+H/s\s+\|\s+Shares:\s+(\d+)/(\d+)/(\d+)/(\d+).*Uptime:\s+(\d+)h(\d+)m') {
+                            $out["hashrate"]=$Matches[1]; $out["submitted"]=[int]$Matches[2]; $out["accepted"]=[int]$Matches[3]; $out["rejected"]=[int]$Matches[4]; $out["stale"]=[int]$Matches[5]
+                            $us=[int]$Matches[6]*3600+[int]$Matches[7]*60; $out["uptime"]=$us; $out["total_hashes"]=[long]([double]$Matches[1]*$us); $foundStats=$true
+                        }
+                        if (-not $foundDiff -and $line -match '\[DagTech\]\s+Difficulty:\s+([\d.]+)') { $out["difficulty"]=[double]$Matches[1]; $foundDiff=$true }
+                        if (-not $foundJob  -and $line -match '\[DagTech\]\s+New job:\s+(\S+)')       { $out["job_id"]=$Matches[1]; $foundJob=$true; $lastJobSeenAt=[datetime]::UtcNow }
+                        if (-not $foundConn) {
+                            if     ($line -match '\[DagTech\] Connected!')           { $out["pool_status"]="connected";    $foundConn=$true }
+                            elseif ($line -match '\[DagTech\] New job:')             { $out["pool_status"]="connected";    $foundConn=$true }
+                            elseif ($line -match '\[DagTech\] Pool connection lost') { $out["pool_status"]="disconnected"; $foundConn=$true }
+                            elseif ($line -match '\[DagTech\] Reconnecting')         { $out["pool_status"]="reconnecting"; $foundConn=$true }
+                            elseif ($line -match '\[DagTech\] Connecting to pool')   { $out["pool_status"]="connecting";   $foundConn=$true }
+                            elseif ($line -match '\[DagTech\] Waiting for work')     { $out["pool_status"]="connecting";   $foundConn=$true }
+                        }
+                    }
+                } catch {}
+            }
+            if ($lastJobSeenAt) { $out["last_job_secs_ago"] = [int]([datetime]::UtcNow - $lastJobSeenAt).TotalSeconds }
+
+            # Fetch per-source share stats from miner metrics HTTP endpoint (port 8882)
+            try {
+                $wr = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$metricsPort/metrics")
+                $wr.Timeout = 2000; $wr.ReadWriteTimeout = 2000; $wr.Method = "GET"; $wr.Proxy = $null
+                $resp = $wr.GetResponse()
+                $mr   = [System.IO.StreamReader]::new($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+                $mj   = $mr.ReadToEnd() | ConvertFrom-Json; $mr.Close(); $resp.Close()
+                foreach ($f in @("cpu_submitted","gpu_submitted","cpu_accepted","gpu_accepted","cpu_rejected","gpu_rejected","cpu_stale","gpu_stale")) {
+                    if ($null -ne $mj.$f) { $out[$f] = [long]$mj.$f }
+                }
+            } catch {}
+
+            $kvs = @()
+            foreach ($k in $out.Keys) {
+                $v = $out[$k]
+                if     ($v -is [bool])   { $kvs += '"' + $k + '":' + ($v.ToString().ToLower()) }
+                elseif ($null -eq $v)    { $kvs += '"' + $k + '":null' }
+                elseif ($v -is [string]) { $kvs += '"' + $k + '":"' + ($v.Replace('\','\\').Replace('"','\"')) + '"' }
+                else                     { $kvs += '"' + $k + '":' + ($v.ToString([System.Globalization.CultureInfo]::InvariantCulture)) }
+            }
+            return '{' + ($kvs -join ',') + '}'
+        }
+
         while ($true) {
             try {
                 $json = Get-SysinfoJson
@@ -521,9 +631,14 @@ function Start-CacheRefresher {
                 [System.IO.File]::WriteAllText($gsTmp, $json, [System.Text.Encoding]::UTF8)
                 Move-Item $gsTmp $gsFile -Force -ErrorAction Stop
             } catch {}
+            try {
+                $json = Get-MetricsJson -configPath $configPath -logDir $logDir
+                [System.IO.File]::WriteAllText($mTmp, $json, [System.Text.Encoding]::UTF8)
+                Move-Item $mTmp $mFile -Force -ErrorAction Stop
+            } catch {}
             Start-Sleep -Seconds 4
         }
-    } -ArgumentList $script:CONFIG, $script:SysinfoFile, $script:GpuStatsFile, ($script:SysinfoFile + '.tmp'), ($script:GpuStatsFile + '.tmp')
+    } -ArgumentList $script:CONFIG, $script:SysinfoFile, $script:GpuStatsFile, ($script:SysinfoFile + '.tmp'), ($script:GpuStatsFile + '.tmp'), $script:MetricsFile, ($script:MetricsFile + '.tmp'), $script:LOGDIR
 
     Write-Log "Background cache refresher started (Job $($script:CacheJob.Id))."
 }
@@ -1043,6 +1158,16 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                 break
             }
             "/metrics" {
+                # Fast path: serve the background-job cache written every 4 s.
+                # Falls back to a live scan only if the cache doesn't exist yet.
+                if (Test-Path $script:MetricsFile) {
+                    try {
+                        $cached = [System.IO.File]::ReadAllText($script:MetricsFile, [System.Text.Encoding]::UTF8)
+                        Send-Response $ctx $cached
+                        break
+                    } catch {}
+                }
+                # ── Fallback: live scan (first few seconds before cache is ready) ──
                 $cfg = Read-Config
                 $minerRunning = $null -ne (Get-MinerProcess)
                 $runningStr   = if ($minerRunning) { "true" } else { "false" }

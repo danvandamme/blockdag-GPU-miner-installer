@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0529.8"
+set "VERSION=GPU-2026.0601.7"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -504,14 +504,22 @@ REM ============================================================================
 REM 4b. Stop any running miner BEFORE touching the binary
 REM     (dagtech-gpu-miner.exe is locked while running; copy silently fails)
 REM ============================================================================
-echo [GPU Miner] Stopping any running miner instance...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Stop-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
-    "$pidFile='%INSTALL_DIR%\logs\control.pid';" ^
-    "if (Test-Path $pidFile) { try { $p=Get-Process -Id ([int](Get-Content $pidFile -Raw).Trim()) -ErrorAction Stop; $p | Stop-Process -Force; Start-Sleep -Milliseconds 800 } catch {} };" ^
-    "Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue;" ^
-    "Get-CimInstance Win32_Process -Filter ""Name='powershell.exe'"" | Where-Object { $_.CommandLine -like '*dagtech-control*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue };" ^
-    "Start-Sleep -Milliseconds 500" 2>nul
+echo [GPU Miner] Force-stopping any running miner instance...
+REM Run the Force Stop script if it exists (ensures HTTP.sys, PID file, and all
+REM orphaned processes are fully cleared before we copy new files over them).
+if exist "%BIN_DIR%\dagtech-force-stop.bat" (
+    call "%BIN_DIR%\dagtech-force-stop.bat" >nul 2>&1
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "Disable-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue | Out-Null;" ^
+        "Stop-ScheduledTask   -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
+        "$pidFile='%INSTALL_DIR%\logs\control.pid';" ^
+        "if (Test-Path $pidFile) { $raw=(Get-Content $pidFile -Raw).Trim(); if ($raw -match '^\d+$') { try { Get-Process -Id ([int]$raw) -EA Stop | Stop-Process -Force } catch {} } };" ^
+        "Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue;" ^
+        "Get-CimInstance Win32_Process -Filter ""Name='powershell.exe'"" | Where-Object { $_.CommandLine -like '*dagtech-control*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue };" ^
+        "netsh http delete urlacl url=http://127.0.0.1:8883/ | Out-Null;" ^
+        "Start-Sleep -Seconds 1" 2>nul
+)
 echo [GPU Miner] Miner stopped.
 
 REM ============================================================================
