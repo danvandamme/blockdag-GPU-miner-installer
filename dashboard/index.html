@@ -841,12 +841,15 @@
                 <div class="stat-sub" id="totalHashes">0 total hashes</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Node Connection</div>
+                <div class="stat-label">Pool Connection <span style="font-size:10px;opacity:.5;font-weight:400;">(stratum)</span></div>
                 <div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
                     <div class="pool-dot" id="poolConnDot"></div>
                     <div class="stat-value" id="poolConnStatus" style="font-size:18px;color:var(--text-dim);">--</div>
                 </div>
                 <div class="stat-sub" id="poolConnSub"></div>
+                <div id="lastJobStaleness" style="display:none;margin-top:5px;font-size:11px;padding:3px 7px;border-radius:4px;background:rgba(251,146,60,0.15);color:#fb923c;border:1px solid rgba(251,146,60,0.3);">
+                    ⚠ No new job in <span id="lastJobAge"></span>
+                </div>
             </div>
         </div>
 
@@ -1088,7 +1091,7 @@
             const banner = document.getElementById('walletWarningBanner');
             if (banner) banner.style.display = data.wallet ? 'none' : 'block';
 
-            // Pool / node connection indicator
+            // Pool stratum connection indicator
             const connDot = document.getElementById('poolConnDot');
             const connTxt = document.getElementById('poolConnStatus');
             const connSub = document.getElementById('poolConnSub');
@@ -1103,6 +1106,18 @@
                 connTxt.style.color  = colors[s]  || 'var(--text-dim)';
                 if (connSub) connSub.textContent = data.pool || '';
             }
+            // Job staleness warning — show if miner is running but no new job for >5 min
+            const staleEl = document.getElementById('lastJobStaleness');
+            const staleAge = document.getElementById('lastJobAge');
+            if (staleEl && data.last_job_secs_ago != null) {
+                const secs = data.last_job_secs_ago;
+                const stale = secs > 300 && data.running;
+                staleEl.style.display = stale ? 'block' : 'none';
+                if (stale && staleAge) {
+                    const m = Math.floor(secs / 60), s2 = secs % 60;
+                    staleAge.textContent = m > 0 ? `${m}m ${s2}s` : `${s2}s`;
+                }
+            } else if (staleEl) { staleEl.style.display = 'none'; }
             els.difficulty.textContent = data.difficulty.toFixed(8);
             els.jobId.textContent      = data.job_id || '--';
             els.version.textContent    = data.version || '--';

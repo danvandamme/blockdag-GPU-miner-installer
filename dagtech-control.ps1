@@ -303,6 +303,7 @@ $script:LastRestartAttempt = $null   # set after each restart attempt
 $script:WatchdogRestarts   = 0       # attempt count; resets when miner comes back up
 $script:MinerStartedAt          = $null   # set in Start-MinerProcess; used by GPU platform check
 $script:GpuPlatformCheckDone    = $false  # reset on each miner start; prevents repeated checks
+$script:LastJobSeenAt           = $null   # updated by watchdog when a New job: line is found
 
 # Detect GPU VRAM and cache recommended intensity to config (runs once; no-op if already cached)
 $null = Detect-GpuVram
@@ -1061,6 +1062,7 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                     mining_mode   = $miningMode
                     pool_status      = "unknown"
                     job_id           = ""
+                    last_job_secs_ago = if ($script:LastJobSeenAt) { [int]([datetime]::UtcNow - $script:LastJobSeenAt).TotalSeconds } else { $null }
                     hashrate         = 0.0
                     accepted         = 0
                     submitted        = 0
@@ -1349,6 +1351,16 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
     if (($now - $script:LastWatchdog).TotalSeconds -ge 30) {
         $script:LastWatchdog = $now
 
+        # ── Daily log rotation: delete miner logs older than 7 days ──────────
+        if ($now.Hour -eq 3 -and $now.Minute -lt 1) {
+            try {
+                $cutoff = $now.AddDays(-7)
+                Get-ChildItem $script:LOGDIR -Filter "miner_*.log" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTime -lt $cutoff } |
+                    Remove-Item -Force -ErrorAction SilentlyContinue
+            } catch {}
+        }
+
         if (Test-Path $script:STOPFILE) {
             # Intentionally stopped — clear all down-tracking
             $script:MinerDownSince     = $null
@@ -1361,6 +1373,20 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                 $script:MinerDownSince     = $null
                 $script:LastRestartAttempt = $null
                 $script:WatchdogRestarts   = 0
+
+                # ── Last-job staleness check ─────────────────────────────────────────
+                # Scan the tail of the log every 30s for "New job:" lines.  If the
+                # miner is running but hasn't received a new job for >5 min, the
+                # pool or node RPC may have stalled.
+                try {
+                    $jobLogFile = Get-ActiveMinerLog
+                    if ($jobLogFile -and (Test-Path $jobLogFile)) {
+                        $jobLines = Get-Content $jobLogFile -Tail 200 -ErrorAction SilentlyContinue
+                        if ($jobLines | Where-Object { $_ -match '\[DagTech\]\s+New job:' }) {
+                            $script:LastJobSeenAt = [datetime]::UtcNow
+                        }
+                    }
+                } catch {}
 
                 # ── GPU platform auto-detect ──────────────────────────────────────────
                 # If GPU mining shows 0 H/s 90 s after start, try GPU_PLATFORM=1.
