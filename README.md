@@ -19,9 +19,10 @@ Supports NVIDIA, AMD, and Intel GPUs via OpenCL. CPU mining runs in parallel.
 | Shortcut | Action |
 |---|---|
 | `DagTech GPU Miner` | Start mining |
-| `DagTech GPU Miner - Stop` | Stop mining |
+| `DagTech GPU Miner - Stop` | Stop mining gracefully |
+| `DagTech GPU Miner - Force Stop` | Kill all miner processes immediately (use if Stop hangs) |
 | `DagTech GPU Miner - Logs` | Open live log terminal |
-| `DagTech GPU Miner - Restart Control` | Restart the dashboard server |
+| `DagTech GPU Miner - Restart Control` | Restart the dashboard server (applies updates) |
 | `DagTech GPU Miner - Uninstall` | Remove the miner completely |
 
 ---
@@ -74,7 +75,7 @@ Open `C:\dagtech-gpu-miner\config.env` in Notepad to edit settings. Restart the 
 | `GPU_ENABLED` | `1` to enable GPU mining, `0` to disable |
 | `GPU_INTENSITY` | GPU workload size 0–100 (higher = more VRAM used) |
 | `GPU_THROTTLE` | GPU duty cycle limit 5–100 (`80` = 80% max, reduces heat) |
-| `GPU_PLATFORM` | OpenCL platform index — try `1` if GPU shows 0 H/s |
+| `GPU_PLATFORM` | OpenCL platform index. Auto-detected on first run — if GPU shows 0 H/s the miner will switch to `1` automatically after 90 seconds. Set manually if auto-detect does not resolve it. |
 | `GPU_DEVICE` | OpenCL device index within the platform (usually `0`) |
 | `GPU_VENDOR` | Detected vendor (`amd`, `nvidia`, `intel`) — informational |
 | `WATCHDOG_RESTART_DELAY` | Seconds miner must be continuously down before the first auto-restart attempt (default `60`) |
@@ -90,13 +91,14 @@ Open `C:\dagtech-gpu-miner\config.env` in Notepad to edit settings. Restart the 
 
 ### GPU shows 0 H/s
 
-**Most common cause on AMD:** OpenCL enumerates platforms in an order that varies by system. The miner defaults to platform `0`, which may be Intel integrated graphics rather than your Radeon card.
+**Auto-detection:** The miner checks GPU hashrate 90 seconds after starting. If GPU is 0 H/s but CPU is running, it automatically switches to `GPU_PLATFORM=1`, saves the change to `config.env`, and restarts. Check the dashboard log — you will see a `Watchdog: GPU hashrate is 0 H/s ... switching to GPU_PLATFORM=1` message if this fires.
 
-**Fix:**
+**If auto-detection does not resolve it** (GPU still 0 H/s after a second start):
 1. Open `C:\dagtech-gpu-miner\config.env` in Notepad
-2. Change `GPU_PLATFORM=0` to `GPU_PLATFORM=1`
+2. Change `GPU_PLATFORM=1` to `GPU_PLATFORM=2`
 3. Save and restart the miner (`DagTech GPU Miner - Stop`, then `DagTech GPU Miner`)
-4. If still 0 H/s, try `GPU_PLATFORM=2`
+
+**Most common cause on AMD:** OpenCL platform order varies by system — Intel integrated graphics may be platform 0 and the Radeon card platform 1 or 2.
 
 ---
 
@@ -221,6 +223,21 @@ Add-MpPreference -ExclusionProcess "C:\dagtech-gpu-miner\bin\dagtech-gpu-miner.e
 4. If the binary was already quarantined, restore it from the ESET quarantine before re-running the installer
 
 **Note:** If the antivirus quarantines the miner binary, the watchdog auto-restart will fail silently because the `.exe` is missing. Always check the AV quarantine first if the miner stops and the watchdog does not bring it back.
+
+---
+
+## Updating
+
+Open the dashboard at **http://127.0.0.1:8883**, click **Update**, and confirm. The control server downloads the latest version from GitHub, applies it, and restarts automatically. The miner keeps running during the update and is only briefly restarted if required.
+
+If the dashboard is not reachable (e.g. after a failed update left a broken script), replace the control script manually:
+
+```powershell
+# Run in an elevated PowerShell window
+$url = "https://raw.githubusercontent.com/danvandamme/blockdag-GPU-miner-installer/main/dagtech-control.ps1"
+Invoke-WebRequest $url -OutFile "C:\dagtech-gpu-miner\bin\dagtech-control.ps1" -UseBasicParsing
+Restart-ScheduledTask "DagTech GPU Miner"
+```
 
 ---
 
