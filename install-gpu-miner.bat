@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0601.8"
+set "VERSION=GPU-2026.0601.9"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -355,6 +355,7 @@ if exist "%CONFIG_FILE%" (
         if "%%k"=="WORKER_NAME"  set "DEF_WORKER=%%l"
         if "%%k"=="WORKER"       set "DEF_WORKER=%%l"
         if "%%k"=="THREADS"      set "DEF_THREADS=%%l"
+        if "%%k"=="CPU_LIMIT"    set "DEF_CPU_LIMIT=%%l"
         if "%%k"=="POOL_PASSWORD" set "DEF_PASSWORD=%%l"
         if "%%k"=="GPU_INTENSITY" set "DEF_GPU_INT=%%l"
         if "%%k"=="GPU_THROTTLE" set "DEF_GPU_THROTTLE=%%l"
@@ -397,6 +398,13 @@ if defined DEF_THREADS set "DEFAULT_THREADS=%DEF_THREADS%"
 echo.
 set /p "THREADS_INPUT=  CPU threads (1-%CPU_CORES%, default %DEFAULT_THREADS%): "
 if "%THREADS_INPUT%"=="" (set "THREADS=%DEFAULT_THREADS%") else (set "THREADS=%THREADS_INPUT%")
+
+echo.
+if not defined DEF_CPU_LIMIT set "DEF_CPU_LIMIT=50"
+echo   CPU throttle limits CPU mining effort to keep the machine cool and usable.
+echo   ^(50 = use about half the CPU; 100 = no limit / full speed.^)
+set /p "CPU_LIMIT_INPUT=  CPU throttle 5-100 (default !DEF_CPU_LIMIT!): "
+if "!CPU_LIMIT_INPUT!"=="" (set "CPU_LIMIT=!DEF_CPU_LIMIT!") else (set "CPU_LIMIT=!CPU_LIMIT_INPUT!")
 
 REM ---- GPU VRAM detection + intensity recommendation -------------------------
 echo.
@@ -477,6 +485,7 @@ echo   Pool        : %POOL%:%PORT%
 echo   Worker      : %WORKER%
 echo   Password    : %PASSWORD%
 echo   CPU Threads : %THREADS%
+echo   CPU Throttle : %CPU_LIMIT%%%
 echo   GPU Intensity: %GPU_INT%
 echo   GPU Throttle : %GPU_THROTTLE%%%
 echo.
@@ -610,7 +619,7 @@ echo MINING_MODE=both
 echo THREADS=!THREADS!
 echo WORKER_NAME=!WORKER!
 echo POOL_PASSWORD=!PASSWORD!
-echo CPU_LIMIT=100
+echo CPU_LIMIT=!CPU_LIMIT!
 echo METRICS_PORT=8882
 echo GPU_ENABLED=1
 echo GPU_INTENSITY=!GPU_INT!
@@ -767,7 +776,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$null=Register-ScheduledTask -TaskName 'DagTech GPU Miner' -Action $a -Trigger $t -Settings $s -Principal $p -Force;" ^
     "Remove-Item '%INSTALL_DIR%\logs\.stop' -Force -ErrorAction SilentlyContinue;" ^
     "$st=Get-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
-    "if ($st) { Start-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue; Write-Host ('[GPU Miner] Task registered and started (service). State: ' + $st.State) } else { Write-Host '[GPU Miner] ERROR: Task registration failed - try running installer as Administrator.' }"
+    "if ($st) { Write-Host ('[GPU Miner] Task registered (system service, starts at boot). State: ' + $st.State) } else { Write-Host '[GPU Miner] ERROR: Task registration failed - try running installer as Administrator.' }"
 if errorlevel 1 echo [GPU Miner] WARNING: Could not register scheduled task - run installer as Administrator.
 goto :task_done
 
@@ -784,10 +793,36 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$null=Register-ScheduledTask -TaskName 'DagTech GPU Miner' -Action $a -Trigger $t -Settings $s -Principal $p -Force;" ^
     "Remove-Item '%INSTALL_DIR%\logs\.stop' -Force -ErrorAction SilentlyContinue;" ^
     "$st=Get-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
-    "if ($st) { Start-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue; Write-Host ('[GPU Miner] Task registered and started (login). State: ' + $st.State) } else { Write-Host '[GPU Miner] ERROR: Task registration failed - try running installer as Administrator.' }"
+    "if ($st) { Write-Host ('[GPU Miner] Task registered (login mode, starts at logon). State: ' + $st.State) } else { Write-Host '[GPU Miner] ERROR: Task registration failed - try running installer as Administrator.' }"
 goto :task_done
 
 :task_done
+
+REM ---- Offer to start mining now --------------------------------------------
+REM Registration above no longer auto-starts; this prompt is the single place
+REM the miner is launched right after install, and it works for every start mode
+REM (manual launches the control server directly; service/login kick the task).
+echo.
+set "START_NOW=Y"
+set /p "START_NOW_INPUT=  Start mining now? [Y/n]: "
+if not "!START_NOW_INPUT!"=="" set "START_NOW=!START_NOW_INPUT!"
+if /i "!START_NOW:~0,1!"=="n" (
+    echo   [GPU Miner] Not starting now. Launch "DagTech GPU Miner" on your desktop when ready.
+) else (
+    echo   [GPU Miner] Starting miner...
+    if /i "!START_MODE_CHOICE!"=="manual" (
+        if exist "%BIN_DIR%\dagtech-start.bat" (
+            start "" "%BIN_DIR%\dagtech-start.bat"
+        ) else (
+            start "" /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%BIN_DIR%\dagtech-control.ps1"
+        )
+    ) else (
+        powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+            "Remove-Item '%INSTALL_DIR%\logs\.stop' -Force -ErrorAction SilentlyContinue;" ^
+            "Start-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue" >nul 2>&1
+    )
+    echo   [GPU Miner] Miner started.  Dashboard: http://127.0.0.1:8883
+)
 
 REM Disable sleep/hibernate so the miner never stops due to power management
 powercfg /change standby-timeout-ac 0 >nul 2>&1
