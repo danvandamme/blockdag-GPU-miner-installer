@@ -1686,7 +1686,14 @@
             }
         }
 
-        // ── Pool profiles (stored in browser localStorage) ────────────────────
+        // ── Pool profiles ─────────────────────────────────────────────────────────
+        // Built-in presets are always shown first and cannot be deleted.
+        // User-saved profiles are stored in localStorage and are fully editable.
+        const _BUILTIN_PROFILES = [
+            { name: 'DagTech',    host: 'excalibur.dagtech.network', port: '3335', password: '',     worker: '' },
+            { name: 'DVDMining',  host: 'dvdmining.ddns.net',        port: '3334', password: '1234', worker: '' },
+            { name: 'Local Node', host: '127.0.0.1',                 port: '3334', password: '1234', worker: '' },
+        ];
         const _POOL_PROFILES_KEY = 'dagtech_pool_profiles';
 
         function _getProfiles() {
@@ -1700,20 +1707,45 @@
             const sel = document.getElementById('poolProfileSelect');
             if (!sel) return;
             const prev = sel.value;
-            const profiles = _getProfiles();
-            sel.innerHTML = '<option value="">— select a saved profile —</option>';
-            profiles.forEach((p, i) => {
+            sel.innerHTML = '<option value="">— select a profile —</option>';
+
+            // Built-in presets (value prefix: b:)
+            const grpBuiltin = document.createElement('optgroup');
+            grpBuiltin.label = 'Built-in';
+            _BUILTIN_PROFILES.forEach((p, i) => {
                 const o = document.createElement('option');
-                o.value = i;
+                o.value = `b:${i}`;
                 o.textContent = `${p.name}  (${p.host}:${p.port})`;
-                sel.appendChild(o);
+                grpBuiltin.appendChild(o);
             });
-            if (prev !== '' && sel.querySelector(`option[value="${prev}"]`)) sel.value = prev;
+            sel.appendChild(grpBuiltin);
+
+            // User-saved profiles (value prefix: u:)
+            const saved = _getProfiles();
+            if (saved.length) {
+                const grpSaved = document.createElement('optgroup');
+                grpSaved.label = 'Saved';
+                saved.forEach((p, i) => {
+                    const o = document.createElement('option');
+                    o.value = `u:${i}`;
+                    o.textContent = `${p.name}  (${p.host}:${p.port})`;
+                    grpSaved.appendChild(o);
+                });
+                sel.appendChild(grpSaved);
+            }
+
+            if (prev && sel.querySelector(`option[value="${prev}"]`)) sel.value = prev;
+        }
+        function _resolveProfile(val) {
+            if (!val) return null;
+            if (val.startsWith('b:')) return _BUILTIN_PROFILES[parseInt(val.slice(2))] || null;
+            if (val.startsWith('u:')) return _getProfiles()[parseInt(val.slice(2))] || null;
+            // legacy numeric values from before prefixes
+            return _getProfiles()[parseInt(val)] || null;
         }
         function loadPoolProfile() {
-            const idx = parseInt(document.getElementById('poolProfileSelect').value);
-            if (isNaN(idx)) return;
-            const p = _getProfiles()[idx];
+            const val = document.getElementById('poolProfileSelect').value;
+            const p = _resolveProfile(val);
             if (!p) return;
             document.getElementById('cfgPoolHost').value = p.host    || '';
             document.getElementById('cfgPoolPort').value = p.port    || '';
@@ -1740,12 +1772,15 @@
             renderPoolProfiles();
             document.getElementById('poolProfileName').value = '';
             const newIdx = _getProfiles().findIndex(p => p.name === name);
-            if (newIdx >= 0) document.getElementById('poolProfileSelect').value = newIdx;
+            if (newIdx >= 0) document.getElementById('poolProfileSelect').value = `u:${newIdx}`;
         }
         function deletePoolProfile() {
-            const sel = document.getElementById('poolProfileSelect');
-            const idx = parseInt(sel.value);
-            if (isNaN(idx)) return;
+            const val = document.getElementById('poolProfileSelect').value;
+            if (!val || val.startsWith('b:')) {
+                alert('Built-in profiles cannot be deleted.');
+                return;
+            }
+            const idx = parseInt(val.slice(2));
             const profiles = _getProfiles();
             if (!profiles[idx]) return;
             if (!confirm(`Delete profile "${profiles[idx].name}"?`)) return;
