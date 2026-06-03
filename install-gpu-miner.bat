@@ -134,6 +134,35 @@ if "!GPU_VENDOR!"=="unknown" (
 if not "!GPU_VENDOR!"=="unknown" echo [GPU Miner] GPU vendor: !GPU_VENDOR!
 
 REM ============================================================================
+REM 1c. Ensure OpenCL ICD is registered in the registry
+REM     Some driver installs (especially after Windows updates) leave the
+REM     Khronos\OpenCL\Vendors registry key empty, so the OpenCL loader finds
+REM     no platforms and the miner reports "No OpenCL platforms found" / 0 H/s.
+REM     We locate the vendor DLL in DriverStore and register it if missing.
+REM ============================================================================
+echo [GPU Miner] Checking OpenCL ICD registry...
+if /i "!GPU_VENDOR!"=="nvidia" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$dll = Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Recurse -Filter 'nvopencl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName;" ^
+        "if ($dll) {" ^
+        "    $reg = 'HKLM:\SOFTWARE\Khronos\OpenCL\Vendors';" ^
+        "    if (-not (Test-Path $reg)) { New-Item -Path $reg -Force | Out-Null };" ^
+        "    $existing = (Get-Item $reg).Property | Where-Object { $_ -like '*nvopencl64*' };" ^
+        "    if (-not $existing) { New-ItemProperty -Path $reg -Name $dll -Value 0 -PropertyType DWORD -Force | Out-Null; Write-Host '[GPU Miner] Registered NVIDIA OpenCL ICD:' $dll } else { Write-Host '[GPU Miner] NVIDIA OpenCL ICD already registered.' }" ^
+        "} else { Write-Host '[GPU Miner] nvopencl64.dll not found - install NVIDIA drivers if GPU shows 0 H/s.' }"
+) else if /i "!GPU_VENDOR!"=="amd" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$dll = Get-ChildItem 'C:\Windows\System32' -Filter 'amdocl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName;" ^
+        "if (-not $dll) { $dll = Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Recurse -Filter 'amdocl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName };" ^
+        "if ($dll) {" ^
+        "    $reg = 'HKLM:\SOFTWARE\Khronos\OpenCL\Vendors';" ^
+        "    if (-not (Test-Path $reg)) { New-Item -Path $reg -Force | Out-Null };" ^
+        "    $existing = (Get-Item $reg).Property | Where-Object { $_ -like '*amdocl64*' };" ^
+        "    if (-not $existing) { New-ItemProperty -Path $reg -Name $dll -Value 0 -PropertyType DWORD -Force | Out-Null; Write-Host '[GPU Miner] Registered AMD OpenCL ICD:' $dll } else { Write-Host '[GPU Miner] AMD OpenCL ICD already registered.' }" ^
+        "} else { Write-Host '[GPU Miner] amdocl64.dll not found - install AMD Radeon Software if GPU shows 0 H/s.' }"
+)
+
+REM ============================================================================
 REM 2. Find C Compiler
 REM ============================================================================
 echo [GPU Miner] Checking for C compiler...
