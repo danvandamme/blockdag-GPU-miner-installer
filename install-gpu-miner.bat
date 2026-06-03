@@ -316,9 +316,9 @@ if "%HAS_GCC%"=="1" if not exist "%OPENCL_HEADERS_DIR%\libOpenCL.a" (
 REM ============================================================================
 REM 3. Locate source files
 REM ============================================================================
-set "SRC_FILE=%~dp0dagtech_miner.c"
-set "SHA256_FILE=%~dp0dagtech_sha256.h"
-set "CL_FILE=%~dp0dagtech_gpu.cl"
+set "SRC_FILE=%~dp0source\dagtech_miner.c"
+set "SHA256_FILE=%~dp0source\dagtech_sha256.h"
+set "CL_FILE=%~dp0source\dagtech_gpu.cl"
 
 if "%HAS_GCC%"=="1" if not exist "%SRC_FILE%" goto :missing_src
 if "%HAS_GCC%"=="1" if not exist "%CL_FILE%" goto :missing_cl
