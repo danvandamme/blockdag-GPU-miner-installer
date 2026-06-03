@@ -436,6 +436,28 @@
             transition: border-color 0.2s;
         }
         .form-input:focus { border-color: var(--blue-primary); }
+        /* Pool profile select — light background so option text is always readable */
+        #poolProfileSelect {
+            background: #f8fafc;
+            color: #0f172a;
+            border-color: rgba(255,255,255,0.18);
+        }
+        #poolProfileSelect:focus { border-color: var(--blue-primary); }
+        #poolProfileSelect option {
+            background: #f8fafc;
+            color: #0f172a;
+        }
+        #poolProfileSelect optgroup {
+            background: #e2e8f0;
+            color: #334155;
+            font-weight: 600;
+            font-size: 11px;
+        }
+        #poolProfileSelect option:hover,
+        #poolProfileSelect option:checked {
+            background: #3b82f6;
+            color: #ffffff;
+        }
         .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
         .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
 
