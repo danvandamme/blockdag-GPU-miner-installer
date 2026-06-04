@@ -1001,9 +1001,10 @@
 
         // Returns { value: '1.23', unit: 'KH/s', html: '1.23 <span class="stat-unit">KH/s</span>' }
         function formatHashrate(h) {
-            if (h === null || h === undefined || isNaN(h)) {
+            if (h === null || h === undefined || h === '' || isNaN(h)) {
                 return { value: '--', unit: 'H/s', html: '-- <span class="stat-unit">H/s</span>', text: '-- H/s' };
             }
+            h = Number(h);   // control server emits hashrate as a quoted string; coerce so .toFixed() works
             let value, unit;
             if      (h >= 1e12) { value = (h / 1e12).toFixed(2); unit = 'TH/s'; }
             else if (h >= 1e9)  { value = (h / 1e9 ).toFixed(2); unit = 'GH/s'; }
@@ -1436,6 +1437,11 @@
                 ]);
 
                 const data = await metricsResp.json();
+                // Control server serializes hashrates as quoted strings; coerce to
+                // numbers so the chart, history, and formatHashrate never choke.
+                data.hashrate     = Number(data.hashrate)     || 0;
+                data.cpu_hashrate = Number(data.cpu_hashrate) || 0;
+                data.gpu_hashrate = Number(data.gpu_hashrate) || 0;
 
                 // Determine running state from /status first, fall back to data.running
                 let isRunning = data.running !== false;
@@ -1459,7 +1465,9 @@
                 setCachedMetrics(data);
                 const prevAccepted = lastAccepted;
                 const prevRejected = lastRejected;
-                applyMetrics(data);
+                // Render failures must NOT flip the badge to "Offline" — online state
+                // is already decided above from /status. Isolate any render error.
+                try { applyMetrics(data); } catch (rErr) { console.error('render error (non-fatal, miner is online):', rErr); }
 
                 // Only log share events when miner is actually running
                 if (isRunning) {
@@ -1498,7 +1506,7 @@
             } catch (e) {
                 setOnline(false, 'Offline');
                 const cached = getCachedMetrics();
-                if (cached) applyMetrics(cached);
+                if (cached) { try { applyMetrics(cached); } catch {} }
             }
         }
 

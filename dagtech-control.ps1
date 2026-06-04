@@ -574,12 +574,12 @@ function Start-CacheRefresher {
                         if ($foundStats -and $foundDiff -and $foundJob -and $foundConn) { break }
                         $line = $lines[$i]
                         if (-not $foundStats -and $line -match '\[DagTech\]\s+([\d.]+)\s+H/s\s+\|\s+CPU:\s+([\d.]+)\s+H/s\s+\|\s+GPU:\s+([\d.]+)\s+H/s\s+\|\s+Shares:\s+(\d+)/(\d+)/(\d+)/(\d+).*Uptime:\s+(\d+)h(\d+)m') {
-                            $out["hashrate"]=$Matches[1]; $out["cpu_hashrate"]=$Matches[2]; $out["gpu_hashrate"]=$Matches[3]
+                            $out["hashrate"]=[double]$Matches[1]; $out["cpu_hashrate"]=[double]$Matches[2]; $out["gpu_hashrate"]=[double]$Matches[3]
                             $out["submitted"]=[int]$Matches[4]; $out["accepted"]=[int]$Matches[5]; $out["rejected"]=[int]$Matches[6]; $out["stale"]=[int]$Matches[7]
                             $us=[int]$Matches[8]*3600+[int]$Matches[9]*60; $out["uptime"]=$us; $out["total_hashes"]=[long]([double]$Matches[1]*$us); $foundStats=$true
                         }
                         if (-not $foundStats -and $line -match '\[DagTech\]\s+([\d.]+)\s+H/s\s+\|\s+Shares:\s+(\d+)/(\d+)/(\d+)/(\d+).*Uptime:\s+(\d+)h(\d+)m') {
-                            $out["hashrate"]=$Matches[1]; $out["submitted"]=[int]$Matches[2]; $out["accepted"]=[int]$Matches[3]; $out["rejected"]=[int]$Matches[4]; $out["stale"]=[int]$Matches[5]
+                            $out["hashrate"]=[double]$Matches[1]; $out["submitted"]=[int]$Matches[2]; $out["accepted"]=[int]$Matches[3]; $out["rejected"]=[int]$Matches[4]; $out["stale"]=[int]$Matches[5]
                             $us=[int]$Matches[6]*3600+[int]$Matches[7]*60; $out["uptime"]=$us; $out["total_hashes"]=[long]([double]$Matches[1]*$us); $foundStats=$true
                         }
                         if (-not $foundDiff -and $line -match '\[DagTech\]\s+Difficulty:\s+([\d.]+)') { $out["difficulty"]=[double]$Matches[1]; $foundDiff=$true }
