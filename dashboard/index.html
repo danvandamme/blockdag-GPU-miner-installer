@@ -1206,8 +1206,6 @@
             ctx.scale(dpr, dpr);
             const w = rect.width, h = rect.height;
             const padding = { top: 10, right: 10, bottom: 30, left: 72 };
-            const chartW = w - padding.left - padding.right;
-            const chartH = h - padding.top  - padding.bottom;
             ctx.clearRect(0, 0, w, h);
             if (hashrateHistory.length < 2) {
                 ctx.fillStyle = '#64748b';
@@ -1219,6 +1217,20 @@
             const hasGpu = hashrateHistory.some(p => (p.gpu || 0) > 0);
             const maxVal = Math.max(...hashrateHistory.flatMap(p => [p.total || p.value || 0, p.cpu || 0, p.gpu || 0]), 1) * 1.1;
 
+            // Size the left margin to the WIDEST y-axis label so it can never be
+            // clipped. The monospace font falls back differently across machines
+            // (SF Mono on Mac, Consolas/Courier on Windows), so measure it live
+            // rather than assuming a fixed width.
+            const Y_LABEL_GAP = 8;
+            ctx.font = '11px SF Mono, monospace';
+            let maxLabelW = 0;
+            for (let i = 0; i <= 4; i++) {
+                maxLabelW = Math.max(maxLabelW, ctx.measureText(formatHashrate(maxVal * (1 - i / 4)).text).width);
+            }
+            padding.left = Math.max(padding.left, Math.ceil(maxLabelW) + Y_LABEL_GAP + 6);
+            const chartW = w - padding.left - padding.right;
+            const chartH = h - padding.top  - padding.bottom;
+
             // Grid lines + y-axis labels
             ctx.strokeStyle = 'rgba(255,255,255,0.04)';
             ctx.lineWidth = 1;
@@ -1227,7 +1239,7 @@
                 ctx.beginPath(); ctx.moveTo(padding.left, y); ctx.lineTo(w - padding.right, y); ctx.stroke();
                 const label = formatHashrate(maxVal * (1 - i / 4)).text;
                 ctx.fillStyle = '#64748b'; ctx.font = '11px SF Mono, monospace'; ctx.textAlign = 'right';
-                ctx.fillText(label, padding.left - 8, y + 4);
+                ctx.fillText(label, padding.left - Y_LABEL_GAP, y + 4);
             }
 
             // Helper: draw one series line, optionally filled
