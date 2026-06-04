@@ -31,19 +31,23 @@ if (Test-Path $script:PENDING_NEW) {
 }
 
 # ── Single-instance guard ────────────────────────────────────────────────────
-# If a previous instance wrote a PID file and that process is still alive,
-# exit immediately so two control servers never run side-by-side.
-if (Test-Path $PIDFILE) {
-    try {
-        $existingPid = [int](Get-Content $PIDFILE -Raw)
-        if ($existingPid -and $existingPid -ne $PID) {
-            $existingProc = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
-            if ($existingProc) {
-                Write-Host "[DagTech GPU] Control server already running (PID $existingPid). Exiting."
-                exit 0
-            }
-        }
-    } catch {}
+# If a previous instance holds the PID file and is still alive, wait briefly for
+# it to exit — this is the normal graceful-restart handoff, where the outgoing
+# server is in the middle of shutting down. Only bail out if a live holder remains
+# after the grace window, which means a genuine second instance is starting up.
+$guardDeadline = (Get-Date).AddSeconds(10)
+while ($true) {
+    $holderPid = $null
+    if (Test-Path $PIDFILE) {
+        try { $holderPid = [int]((Get-Content $PIDFILE -Raw).Trim()) } catch { $holderPid = $null }
+    }
+    if (-not $holderPid -or $holderPid -eq $PID) { break }            # slot free, or already ours
+    if (-not (Get-Process -Id $holderPid -ErrorAction SilentlyContinue)) { break }   # stale PID file — take over
+    if ((Get-Date) -ge $guardDeadline) {
+        Write-Host "[DagTech GPU] Control server already running (PID $holderPid). Exiting."
+        exit 0
+    }
+    Start-Sleep -Milliseconds 250                                     # wait for the outgoing instance to release the slot
 }
 [System.IO.File]::WriteAllText($PIDFILE, "$PID")
 
@@ -659,21 +663,47 @@ try {
 
 Write-Log "Control server listening on http://127.0.0.1:8883/"
 
-# ── Orphan-miner sweep ───────────────────────────────────────────────────────
-# We only reach here if the single-instance guard above passed, i.e. this is the
-# ONLY live control server. Therefore any dagtech-gpu-miner.exe already running
-# is an orphan left by a previous control server that died without cleaning up
-# (e.g. a reinstall race, a crash, or a forced logoff). Kill all such miners and
-# clear the stale PID file so Start-MinerProcess below launches exactly one miner
-# bound to THIS control server. Without this, an orphan keeps serving stale state
-# and the dashboard reads "offline" even though mining is fine.
-Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
-Remove-Item $script:MINERPIDF -Force -ErrorAction SilentlyContinue
-
-# Clear any leftover stop file and start the miner
+# ── Reconcile miner state ─────────────────────────────────────────────────────
+# Ensure exactly ONE miner — running the CURRENT on-disk binary — is alive, and
+# act only on the delta:
+#   • Graceful control-server restart: a healthy miner running the current binary
+#     is ADOPTED (left untouched), so the restart is gap-free.
+#   • Reinstall / binary update: a miner started before the current binary's mtime
+#     is stale, so it is cycled to pick up the new binary.
+#   • Crash / reinstall race / forced logoff: any duplicate or untracked miner is
+#     swept, then one fresh miner is started.
+# A control-server (re)start resumes mining, so clear any leftover stop file first.
 if (Test-Path $script:STOPFILE) { Remove-Item $script:STOPFILE -Force }
-Start-MinerProcess
+
+$trackedPid = $null
+if (Test-Path $script:MINERPIDF) {
+    try { $trackedPid = [int]((Get-Content $script:MINERPIDF -Raw).Trim()) } catch { $trackedPid = $null }
+}
+$tracked = if ($trackedPid) { Get-Process -Id $trackedPid -ErrorAction SilentlyContinue } else { $null }
+
+# Adopt the tracked miner only if it is alive AND was started after the current
+# binary was written (i.e. it is running the current build, not a stale one).
+$adopt = $false
+if ($tracked -and $tracked.Name -match 'dagtech') {
+    try {
+        $binMtime = (Get-Item $script:BIN).LastWriteTimeUtc
+        if ($tracked.StartTime.ToUniversalTime() -ge $binMtime.AddSeconds(-5)) { $adopt = $true }   # 5s skew tolerance
+    } catch { $adopt = $true }   # if the comparison fails, prefer adopting over a needless restart
+}
+
+# Sweep every miner that is NOT the one we are adopting (duplicates, stale orphans,
+# or a process still running an outdated binary after a reinstall).
+Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue |
+    Where-Object { -not ($adopt -and $_.Id -eq $trackedPid) } |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+
+if ($adopt) {
+    Write-Log "Reconcile: adopted healthy miner PID $trackedPid (current binary) — no restart."
+} else {
+    Remove-Item $script:MINERPIDF -Force -ErrorAction SilentlyContinue
+    Write-Log "Reconcile: no current healthy miner — starting fresh."
+    Start-MinerProcess
+}
 
 # Synchronous request loop
 while ($listener.IsListening) {
@@ -1608,15 +1638,33 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
     }
 }
 
-# Spawn a fresh control server if a restart was requested (update applied)
+# Spawn a fresh control server if a restart was requested (update applied or
+# /restart-server). Spawn FIRST (so we hold the child handle), then release our
+# PID slot so the child's single-instance guard can claim it, then VERIFY the
+# child is actually listening before we give up — no silent fire-and-forget.
 if ($script:PendingRestart) {
-    Remove-Item $PIDFILE -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 400
-    Start-Process powershell -ArgumentList @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
-        "-File", $script:CTRL_SCRIPT, "-BaseDir", $script:BASE
-    ) -ErrorAction SilentlyContinue
-    Write-Log "Control server respawn initiated."
+    $child = $null
+    try {
+        $child = Start-Process powershell -PassThru -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+            "-File", $script:CTRL_SCRIPT, "-BaseDir", $script:BASE
+        )
+    } catch {
+        Write-Log "RESPAWN FAILED to launch a new control server: $_"
+    }
+    if ($child) {
+        Write-Log "Control server respawn initiated (child PID $($child.Id)). Verifying..."
+        Remove-Item $PIDFILE -Force -ErrorAction SilentlyContinue   # let the child's guard claim the slot
+        $up = $false
+        for ($i = 0; $i -lt 20; $i++) {                             # up to ~10s
+            Start-Sleep -Milliseconds 500
+            try {
+                if ((Invoke-WebRequest 'http://127.0.0.1:8883/status' -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200) { $up = $true; break }
+            } catch {}
+        }
+        if ($up) { Write-Log "Respawn verified: new control server is listening on 8883." }
+        else     { Write-Log "WARNING: respawned control server did not respond on 8883 within 10s — the scheduled task will recover it on next trigger/reboot." }
+    }
 }
 
 # Stop background cache refresh job
