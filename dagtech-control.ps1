@@ -659,6 +659,18 @@ try {
 
 Write-Log "Control server listening on http://127.0.0.1:8883/"
 
+# ── Orphan-miner sweep ───────────────────────────────────────────────────────
+# We only reach here if the single-instance guard above passed, i.e. this is the
+# ONLY live control server. Therefore any dagtech-gpu-miner.exe already running
+# is an orphan left by a previous control server that died without cleaning up
+# (e.g. a reinstall race, a crash, or a forced logoff). Kill all such miners and
+# clear the stale PID file so Start-MinerProcess below launches exactly one miner
+# bound to THIS control server. Without this, an orphan keeps serving stale state
+# and the dashboard reads "offline" even though mining is fine.
+Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+Remove-Item $script:MINERPIDF -Force -ErrorAction SilentlyContinue
+
 # Clear any leftover stop file and start the miner
 if (Test-Path $script:STOPFILE) { Remove-Item $script:STOPFILE -Force }
 Start-MinerProcess
