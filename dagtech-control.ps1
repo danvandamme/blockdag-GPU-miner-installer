@@ -601,14 +601,29 @@ function Start-CacheRefresher {
             }
             if ($lastJobSeenAt) { $out["last_job_secs_ago"] = [int]([datetime]::UtcNow - $lastJobSeenAt).TotalSeconds }
 
-            # Fetch per-source share stats from miner metrics HTTP endpoint (port 8882)
+            # Pull authoritative stats from the miner's own metrics endpoint (8882).
+            # The miner computes hashrate/share totals correctly for ANY GPU count,
+            # whereas the log-line scrape above only matches the single-GPU format
+            # ("... | GPU: <n> H/s | ...") and silently reads ZERO when 2+ GPUs are
+            # active (multi-GPU logs print "... | GPU[0]: x | GPU[1]: y | ..."). So
+            # when the API is reachable, its numbers win; the log scrape stays as the
+            # fallback for the brief window before the miner's HTTP server is up.
             try {
                 $wr = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$metricsPort/metrics")
                 $wr.Timeout = 2000; $wr.ReadWriteTimeout = 2000; $wr.Method = "GET"; $wr.Proxy = $null
                 $resp = $wr.GetResponse()
                 $mr   = [System.IO.StreamReader]::new($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
                 $mj   = $mr.ReadToEnd() | ConvertFrom-Json; $mr.Close(); $resp.Close()
+                # Per-source share counters (only available from the API)
                 foreach ($f in @("cpu_submitted","gpu_submitted","cpu_accepted","gpu_accepted","cpu_rejected","gpu_rejected","cpu_stale","gpu_stale")) {
+                    if ($null -ne $mj.$f) { $out[$f] = [long]$mj.$f }
+                }
+                # Hashrates (doubles) — broken by the multi-GPU log format
+                foreach ($f in @("hashrate","cpu_hashrate","gpu_hashrate")) {
+                    if ($null -ne $mj.$f) { $out[$f] = [double]$mj.$f }
+                }
+                # Aggregate counters / uptime / total hashes (longs) — same breakage
+                foreach ($f in @("submitted","accepted","rejected","stale","total_hashes","uptime")) {
                     if ($null -ne $mj.$f) { $out[$f] = [long]$mj.$f }
                 }
             } catch {}
