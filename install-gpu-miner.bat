@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0604.3"
+set "VERSION=GPU-2026.0604.4"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -184,15 +184,31 @@ for %%d in (
 set "HAS_GCC=0"
 where gcc >nul 2>&1 && set "HAS_GCC=1"
 
+REM Reject a 32-bit compiler (e.g. an old C:\MinGW / mingw32 on PATH): it cannot
+REM link the 64-bit system OpenCL.dll and can only ever produce a broken binary.
+REM Treat it as "no compiler" so we fall back to the bundled 64-bit exe.
+if "%HAS_GCC%"=="1" (
+    set "_GCC_MACH="
+    for /f "tokens=*" %%m in ('gcc -dumpmachine 2^>nul') do set "_GCC_MACH=%%m"
+    echo !_GCC_MACH! | find /i "x86_64" >nul
+    if errorlevel 1 (
+        echo [GPU Miner] Ignoring 32-bit compiler ^(!_GCC_MACH!^); using bundled 64-bit binary.
+        set "HAS_GCC=0"
+    )
+)
+
 set "HAS_BUNDLED=0"
 if exist "%~dp0dagtech-gpu-miner.exe" set "HAS_BUNDLED=1"
 
+REM The bundled 64-bit exe is the guaranteed baseline (installed in step 6). A
+REM valid 64-bit compiler is then used as a bonus to rebuild it with -march=native
+REM CPU tuning, but a failed compile never removes the bundled binary.
 if "%HAS_GCC%"=="1" (
-    echo [GPU Miner] Compiler found - will compile from source.
+    echo [GPU Miner] 64-bit compiler found - will install bundled binary, then tune for this CPU.
     goto :compiler_ready
 )
 if "%HAS_BUNDLED%"=="1" (
-    echo [GPU Miner] No compiler found - will use bundled pre-built binary.
+    echo [GPU Miner] Using bundled pre-built 64-bit binary.
     goto :compiler_ready
 )
 
@@ -566,17 +582,21 @@ REM -- Compile from source if compiler available --
 if not "%HAS_GCC%"=="1" goto :compile_else
 if not exist "%SRC_FILE%" goto :compile_else
 
-echo [GPU Miner] Compiling from source with GPU support...
+echo [GPU Miner] Tuning the miner for this CPU (native 64-bit compile)...
 copy /y "%CL_FILE%" "%BIN_DIR%\dagtech_gpu.cl" >nul 2>&1
 echo [GPU Miner] OpenCL kernel installed.
 
-gcc -DDAGTECH_GPU -I"%OPENCL_HEADERS_DIR%" -L"%OPENCL_HEADERS_DIR%" -O2 -march=native -Wall -D_WIN32_WINNT=0x0600 -o "%BIN_DIR%\dagtech-gpu-miner.exe" "%SRC_FILE%" -lws2_32 -lm -lkernel32 -lOpenCL -static-libgcc -Wl,-Bstatic,-lpthread,-Bdynamic
+REM Compile to a TEMP file and only replace the deployed binary on success, so a
+REM failed compile can never destroy the bundled exe installed in step 6 above.
+gcc -DDAGTECH_GPU -I"%OPENCL_HEADERS_DIR%" -L"%OPENCL_HEADERS_DIR%" -O2 -march=native -Wall -D_WIN32_WINNT=0x0600 -o "%BIN_DIR%\dagtech-gpu-miner.exe.new" "%SRC_FILE%" -lws2_32 -lm -lkernel32 -lOpenCL -static-libgcc -Wl,-Bstatic,-lpthread,-Bdynamic
 
 if errorlevel 1 (
-    echo [GPU Miner] Compile failed - keeping bundled binary if available.
+    echo [GPU Miner] Native compile failed - keeping the bundled 64-bit binary.
+    del /f /q "%BIN_DIR%\dagtech-gpu-miner.exe.new" 2>nul
     goto :compile_done
 )
-echo [GPU Miner] Compiled successfully.
+move /y "%BIN_DIR%\dagtech-gpu-miner.exe.new" "%BIN_DIR%\dagtech-gpu-miner.exe" >nul
+echo [GPU Miner] Native-optimized build installed.
 set "_GCC_DIR="
 for /f "tokens=*" %%g in ('where gcc 2^>nul') do if not defined _GCC_DIR set "_GCC_DIR=%%~dpg"
 if defined _GCC_DIR (
