@@ -1643,18 +1643,42 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
 # PID slot so the child's single-instance guard can claim it, then VERIFY the
 # child is actually listening before we give up — no silent fire-and-forget.
 if ($script:PendingRestart) {
-    $child = $null
+    # Relaunch the control server so the (possibly updated) script is reloaded —
+    # a running PowerShell script can't hot-swap its own body, so it must exit and
+    # start a fresh copy. Use the SAME mechanism the server was started with, and
+    # make sure the new instance has NO visible window: otherwise the restart
+    # leaves the old (now-dead) console behind AND pops a new one. On Windows 11
+    # the default console host (Windows Terminal) ignores `-WindowStyle Hidden`,
+    # so the old `Start-Process powershell -WindowStyle Hidden` surfaced a stray
+    # Terminal window every time.
+    $taskExists = $null -ne (Get-ScheduledTask -TaskName $script:TASK_NAME -ErrorAction SilentlyContinue)
+    $launched   = $false
     try {
-        $child = Start-Process powershell -PassThru -ArgumentList @(
-            "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
-            "-File", $script:CTRL_SCRIPT, "-BaseDir", $script:BASE
-        )
+        if ($taskExists) {
+            # Service install: relaunch via Task Scheduler. Tasks run with no
+            # console window at all, and this matches the normal startup path.
+            Remove-Item $PIDFILE -Force -ErrorAction SilentlyContinue   # release the slot for the new instance's guard
+            Start-ScheduledTask -TaskName $script:TASK_NAME -ErrorAction Stop
+            $launched = $true
+            Write-Log "Control server respawn requested via scheduled task '$($script:TASK_NAME)' (windowless). Verifying..."
+        } else {
+            # Manual / direct launch: start hidden via CreateProcess with
+            # CreateNoWindow. Unlike -WindowStyle Hidden, CreateNoWindow can't be
+            # overridden by Windows Terminal, so the new server stays truly invisible.
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName        = (Join-Path $PSHOME 'powershell.exe')
+            $psi.Arguments       = '-NoProfile -ExecutionPolicy Bypass -File "' + $script:CTRL_SCRIPT + '" -BaseDir "' + $script:BASE + '"'
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow  = $true
+            $psi.WindowStyle     = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            $child = [System.Diagnostics.Process]::Start($psi)
+            Remove-Item $PIDFILE -Force -ErrorAction SilentlyContinue   # let the child's guard claim the slot
+            if ($child) { $launched = $true; Write-Log "Control server respawn launched (child PID $($child.Id), windowless). Verifying..." }
+        }
     } catch {
         Write-Log "RESPAWN FAILED to launch a new control server: $_"
     }
-    if ($child) {
-        Write-Log "Control server respawn initiated (child PID $($child.Id)). Verifying..."
-        Remove-Item $PIDFILE -Force -ErrorAction SilentlyContinue   # let the child's guard claim the slot
+    if ($launched) {
         $up = $false
         for ($i = 0; $i -lt 20; $i++) {                             # up to ~10s
             Start-Sleep -Milliseconds 500
