@@ -648,7 +648,10 @@
                 <div id="cpuControlsSection" style="transition:opacity 0.2s;">
                 <div class="form-row">
                     <div class="form-group">
-                        <label class="form-label">CPU Threads</label>
+                        <label class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                            <span>CPU Threads</span>
+                            <span id="cpuDetectedInfo" style="font-size:11px;font-weight:400;color:var(--text-dim);"></span>
+                        </label>
                         <input class="form-input" id="cfgThreads" type="number" placeholder="4" min="1" max="256">
                     </div>
                     <div class="form-group">
@@ -656,6 +659,7 @@
                         <input class="form-input" id="cfgCpuLimit" type="number" placeholder="100" min="1" max="100" title="Throttle CPU usage per thread (1-100%).">
                     </div>
                 </div>
+                <div id="cpuDetectedName" style="margin-top:-2px;margin-bottom:6px;font-size:11px;color:var(--text-dim);"></div>
                 </div><!-- /#cpuControlsSection -->
                 <div id="gpuControlsSection" style="transition:opacity 0.2s;">
                 <div class="form-group" id="gpuDeviceSection">
@@ -1123,6 +1127,13 @@
             els.jobId.textContent      = data.job_id || '--';
             els.version.textContent    = data.version || '--';
             if (els.threads) els.threads.textContent = data.threads;
+            // CPU identity for the Config panel (so the thread range is visible while choosing threads)
+            const cpuDetInfo = document.getElementById('cpuDetectedInfo');
+            if (cpuDetInfo && data.cpu_cores) cpuDetInfo.textContent = data.cpu_cores + ' cores · range 1-' + data.cpu_cores;
+            const cpuDetName = document.getElementById('cpuDetectedName');
+            if (cpuDetName && data.cpu_name) cpuDetName.textContent = 'Detected: ' + data.cpu_name;
+            const thrInput = document.getElementById('cfgThreads');
+            if (thrInput && data.cpu_cores) thrInput.placeholder = String(Math.max(1, Math.floor(data.cpu_cores / 2)));
 
             // CPU / GPU per-source hashrate card
             const cpuHrEl = document.getElementById('cpuHashrateVal');
@@ -1922,6 +1933,19 @@
             document.getElementById('configStatus').style.color = '';
             document.getElementById('configModal').classList.add('open');
             renderPoolProfiles();
+            // Pre-fill the detected-CPU hint from the last cached metrics so the
+            // thread range shows immediately on open (even if the miner is momentarily down).
+            try {
+                const cm = getCachedMetrics();
+                if (cm) {
+                    const cd = document.getElementById('cpuDetectedInfo');
+                    if (cd && cm.cpu_cores) cd.textContent = cm.cpu_cores + ' cores · range 1-' + cm.cpu_cores;
+                    const cn = document.getElementById('cpuDetectedName');
+                    if (cn && cm.cpu_name) cn.textContent = 'Detected: ' + cm.cpu_name;
+                    const ti = document.getElementById('cfgThreads');
+                    if (ti && cm.cpu_cores) ti.placeholder = String(Math.max(1, Math.floor(cm.cpu_cores / 2)));
+                }
+            } catch (e) {}
             // Fetch config and GPU list concurrently
             const [cfgResult, gpuResult] = await Promise.allSettled([
                 fetch(`${CONTROL_URL}/config`,    { signal: AbortSignal.timeout(4000) }),

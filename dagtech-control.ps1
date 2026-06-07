@@ -626,6 +626,9 @@ function Start-CacheRefresher {
                 foreach ($f in @("submitted","accepted","rejected","stale","total_hashes","uptime")) {
                     if ($null -ne $mj.$f) { $out[$f] = [long]$mj.$f }
                 }
+                # CPU identity (string + int) for the dashboard System card
+                if ($null -ne $mj.cpu_name)  { $out["cpu_name"]  = [string]$mj.cpu_name }
+                if ($null -ne $mj.cpu_cores) { $out["cpu_cores"] = [long]$mj.cpu_cores }
             } catch {}
 
             $kvs = @()
@@ -1346,6 +1349,8 @@ Get-Content -Wait -Tail 50 `$log | ForEach-Object {
                     foreach ($f in @("cpu_submitted","gpu_submitted","cpu_accepted","gpu_accepted","cpu_rejected","gpu_rejected","cpu_stale","gpu_stale")) {
                         if ($null -ne $mj.$f) { $out[$f] = [long]$mj.$f }
                     }
+                    if ($null -ne $mj.cpu_name)  { $out["cpu_name"]  = [string]$mj.cpu_name }
+                    if ($null -ne $mj.cpu_cores) { $out["cpu_cores"] = [long]$mj.cpu_cores }
                 } catch {}
                 $kvs = @('"running":' + $runningStr)
                 foreach ($k in $out.Keys) {

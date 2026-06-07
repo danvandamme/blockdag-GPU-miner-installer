@@ -76,6 +76,13 @@
   #include <sys/stat.h>
 #endif
 
+/* CPU brand-string detection (CPUID on x86; sysctl on macOS). */
+#if defined(_MSC_VER)
+  #include <intrin.h>
+#elif defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+  #include <cpuid.h>
+#endif
+
 #ifdef _WIN32
   #define DT_PRIu64 "I64u"
 #else
@@ -85,7 +92,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0604.8"
+#define DAGTECH_VERSION       "GPU-2026.0607.1"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -112,6 +119,10 @@ static volatile int running    = 1;
 static volatile int keep_alive = 1;  /* 0 = clean program exit; stays 1 across reconnects */
 static int  metrics_port       = 8881;  /* built-in metrics/dashboard endpoint */
 static char dashboard_dir[512] = "";
+
+/* Detected host CPU, shown at startup and in the metrics JSON. */
+static char g_cpu_brand[96]    = "";
+static int  g_cpu_cores        = 0;   /* total logical processors found */
 
 /* GPU configuration */
 static int gpu_enabled   = -1;  /* -1=auto, 0=disabled, 1=enabled */
@@ -185,6 +196,21 @@ static DagTechJob current_job = {0};
 static char extranonce1_global[16] = "";
 static double current_difficulty = 0.01;
 
+/* Adaptive submit margin. margin >= 1.0 tightens the share threshold so we
+ * submit fewer, higher-quality shares. Default 1.0 = identical to old behaviour;
+ * with auto_threshold on it only rises if the pool actually rejects shares as
+ * "low difficulty". Mirrors the reference miner's SUBMIT_MARGIN/AUTO_THRESHOLD. */
+static double submit_margin  = 1.0;  /* base, from SUBMIT_MARGIN / --submit-margin */
+static double active_margin  = 1.0;  /* dynamic; rises after low-difficulty rejects */
+static int    auto_threshold = 1;    /* 1 = raise active_margin on lowdiff rejects */
+
+static double dagtech_effective_diff(double base) {
+    double m = active_margin;
+    if (m < 1.0)    m = 1.0;
+    if (base <= 0.0) base = 1.0;
+    return base * m;
+}
+
 /* =========================================================================
  * Utility Functions - DagTech Implementation
  * ========================================================================= */
@@ -214,6 +240,11 @@ static long long dagtech_tick_ms(void) {
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 #endif
 }
+
+/* High-resolution millisecond clock (QueryPerformanceCounter on Windows).
+ * Forward-declared here; defined near the share submitter below. Used by the
+ * GPU loop to sanity-check batch duration. */
+static uint64_t dagtech_now_ms(void);
 
 static void sha256d(const uint8_t *data, int len, uint8_t *out) {
     uint8_t h1[32];
@@ -427,6 +458,47 @@ static size_t gpu_intensity_to_global_size(int intensity) {
     return (size_t)1 << (int)(exp_val + 0.5);
 }
 
+/* Largest power of two <= n (n must be >= 1) */
+static size_t gpu_floor_pow2(size_t n) {
+    size_t p = 1;
+    while ((p << 1) != 0 && (p << 1) <= n) p <<= 1;
+    return p;
+}
+
+/* Clamp the requested work-item count so the per-work-item scrypt scratchpad
+ * (V buffer) actually fits this device.  scrypt N=1024 needs 128 KB of scratch
+ * per work-item, AND a single OpenCL allocation cannot exceed
+ * CL_DEVICE_MAX_MEM_ALLOC_SIZE (commonly ~1/4 of VRAM on NVIDIA/AMD).  Without
+ * this clamp the default intensity (80 -> 2^19 work-items -> ~64 GB) fails to
+ * allocate on every real GPU and the miner silently drops to CPU-only.
+ * Returns a work-item count guaranteed to allocate (power of two). */
+static size_t gpu_fit_global_size(cl_device_id dev, size_t desired, int gpu_index) {
+    const size_t per_item = 1024u * 32u * sizeof(cl_uint);  /* 128 KB / work-item */
+    cl_ulong global_mem = 0, max_alloc = 0;
+    clGetDeviceInfo(dev, CL_DEVICE_GLOBAL_MEM_SIZE,    sizeof(global_mem), &global_mem, NULL);
+    clGetDeviceInfo(dev, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(max_alloc),  &max_alloc,  NULL);
+
+    /* Budget = the smaller of (max single allocation) and 80% of total VRAM. */
+    cl_ulong budget = max_alloc;
+    if (global_mem > 0) {
+        cl_ulong soft = (cl_ulong)((double)global_mem * 0.80);
+        if (budget == 0 || soft < budget) budget = soft;
+    }
+    if (budget == 0) return desired;  /* couldn't query limits — trust caller */
+
+    size_t max_items = (size_t)(budget / (cl_ulong)per_item);
+    if (max_items < 1) max_items = 1;
+    if (desired <= max_items) return desired;
+
+    size_t fitted = gpu_floor_pow2(max_items);
+    printf("[DagTech GPU] GPU %d: requested %zu work-items needs %.1f GB; device caps at "
+           "%.1f GB (max-alloc %.1f GB) -> clamping to %zu.\n",
+           gpu_index, desired, (double)desired * per_item / (1024.0*1024.0*1024.0),
+           (double)budget / (1024.0*1024.0*1024.0),
+           (double)max_alloc / (1024.0*1024.0*1024.0), fitted);
+    return fitted;
+}
+
 /* Load the kernel source from the same directory as argv[0] */
 static char *gpu_load_kernel_source(const char *exe_path, size_t *src_len) {
     char cl_path[1024];
@@ -571,6 +643,8 @@ static int gpu_init_one(GpuCtx *ctx, cl_platform_id platform, int platform_idx,
     ctx->intensity   = (gpu_intensity_count > gpu_index) ?
                         gpu_intensity_list[gpu_index] : gpu_intensity;
     ctx->global_size = gpu_intensity_to_global_size(ctx->intensity);
+    /* Clamp to what this device can actually allocate (VRAM + max-alloc cap). */
+    ctx->global_size = gpu_fit_global_size(ctx->device, ctx->global_size, gpu_index);
     printf("[DagTech GPU] GPU %d: global work size %zu (intensity %d)\n",
            gpu_index, ctx->global_size, ctx->intensity);
 
@@ -578,6 +652,21 @@ static int gpu_init_one(GpuCtx *ctx, cl_platform_id platform, int platform_idx,
     printf("[DagTech GPU] GPU %d: allocating V buffer %.1f MB\n",
            gpu_index, v_bytes / (1024.0 * 1024.0));
     ctx->V_buf = clCreateBuffer(ctx->ctx, CL_MEM_READ_WRITE, v_bytes, NULL, &err);
+    /* Belt-and-suspenders: if the driver still refuses (VRAM fragmented or in
+     * use by the display/other apps), halve the work size and retry a few times
+     * before giving up.  global_size stays a power of two so nonce tiling holds. */
+    {
+        int v_retries = 0;
+        while (err != CL_SUCCESS && ctx->global_size > ((size_t)1 << 12) && v_retries < 6) {
+            ctx->global_size >>= 1;
+            v_bytes = ctx->global_size * 1024 * 32 * sizeof(cl_uint);
+            printf("[DagTech GPU] GPU %d: V buffer alloc failed (err %d); retrying at "
+                   "work size %zu (%.1f MB)\n",
+                   gpu_index, err, ctx->global_size, v_bytes / (1024.0 * 1024.0));
+            ctx->V_buf = clCreateBuffer(ctx->ctx, CL_MEM_READ_WRITE, v_bytes, NULL, &err);
+            v_retries++;
+        }
+    }
     if (err != CL_SUCCESS) {
         fprintf(stderr, "[DagTech GPU] V buffer failed (GPU %d, %zu bytes): %d\n"
                         "[DagTech GPU] Try reducing --gpu-intensity.\n", gpu_index, v_bytes, err);
@@ -710,6 +799,12 @@ static void *dagtech_gpu_thread(void *arg) {
         return NULL;
     }
 
+    /* Counts kernel batches that failed to execute (launch/wait/read errors,
+     * e.g. driver watchdog/TDR or lost context). Used to rate-limit error
+     * logging and to keep failures visible — failed batches are NOT counted as
+     * hashes, so a broken kernel reads ~0 H/s instead of a fake high rate. */
+    unsigned long long kernel_errors = 0;
+
     while (running) {
         DagTechJob j;
         pthread_mutex_lock(&job_mtx);
@@ -758,7 +853,7 @@ static void *dagtech_gpu_thread(void *arg) {
          * pre-filter target is the upper 32 bits of that threshold.
          * Using 0xFFFFFFFF/diff instead is ~1000x too lenient: atomic_min
          * always picks a nonce near nonce_base that rarely passes the CPU check. */
-        double diff = j.difficulty > 0.0 ? j.difficulty : 1.0;
+        double diff = dagtech_effective_diff(j.difficulty);
         double thresh_d = (double)0x0000FFFF00000000ULL / diff;
         uint64_t thresh64 = (thresh_d >= 18446744073709551615.0) ? 0xFFFFFFFFFFFFFFFFULL : (uint64_t)thresh_d;
         cl_uint target32 = (cl_uint)(thresh64 >> 32);
@@ -788,24 +883,70 @@ static void *dagtech_gpu_thread(void *arg) {
             clSetKernelArg(ctx->kernel, 4, sizeof(cl_uint), &nonce_base);
 
             /* Launch */
-            long long gpu_t0 = dagtech_tick_ms();
+            uint64_t gpu_t0 = dagtech_now_ms();
             cl_event ev;
             cl_int err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel, 1, NULL,
                                                  &ctx->global_size, NULL, 0, NULL, &ev);
             if (err != CL_SUCCESS) {
-                fprintf(stderr, "[DagTech GPU] Kernel launch error (GPU %d): %d\n", gpu_idx, err);
+                kernel_errors++;
+                if (kernel_errors <= 3 || (kernel_errors % 50) == 0)
+                    fprintf(stderr, "[DagTech GPU] GPU %d kernel launch error: %d (count=%llu)\n",
+                            gpu_idx, err, (unsigned long long)kernel_errors);
+                usleep(500000);
                 break;
             }
-            clWaitForEvents(1, &ev);
+
+            /* Wait for the kernel to actually finish. If it FAILED to execute
+             * (driver watchdog/TDR reset, out-of-resources, lost context), the
+             * error surfaces here. We must NOT count this batch: counting failed
+             * batches inflates the reported hashrate to absurd values while
+             * finding zero shares, which hides the failure from the user. */
+            cl_int werr = clWaitForEvents(1, &ev);
             clReleaseEvent(ev);
-            long long gpu_elapsed = dagtech_tick_ms() - gpu_t0;
+            long long gpu_elapsed = (long long)(dagtech_now_ms() - gpu_t0);
+            if (werr != CL_SUCCESS) {
+                kernel_errors++;
+                if (kernel_errors <= 3 || (kernel_errors % 50) == 0)
+                    fprintf(stderr, "[DagTech GPU] GPU %d kernel did not complete "
+                            "(clWaitForEvents=%d, count=%llu) - not counting batch. "
+                            "Check driver timeout (TDR) or lower --gpu-intensity.\n",
+                            gpu_idx, werr, (unsigned long long)kernel_errors);
+                usleep(500000);
+                break;
+            }
+
+            /* Timing sanity floor: a real batch of >=16384 scrypt(N=1024) hashes
+             * moves >=4 GB of memory and cannot finish in ~0 ms on ANY GPU. If it
+             * does, the kernel reported success but did no real work (miscompiled
+             * / no-op on this driver). Counting it would report a huge fake
+             * hashrate with zero shares — the exact failure that hides a dead GPU.
+             * Don't count it; surface it instead. */
+            if (gpu_elapsed < 2) {
+                kernel_errors++;
+                if (kernel_errors <= 3 || (kernel_errors % 50) == 0)
+                    fprintf(stderr, "[DagTech GPU] GPU %d batch finished implausibly fast "
+                            "(%lld ms for %zu hashes, count=%llu) - kernel not doing real "
+                            "work; not counting. Update GPU drivers / OpenCL runtime.\n",
+                            gpu_idx, gpu_elapsed, ctx->global_size, (unsigned long long)kernel_errors);
+                usleep(500000);
+                break;
+            }
 
             /* Read output */
             cl_uint output_result[2] = { 0xFFFFFFFFu, 0 };
-            clEnqueueReadBuffer(ctx->queue, ctx->output_buf, CL_TRUE, 0,
+            cl_int rerr = clEnqueueReadBuffer(ctx->queue, ctx->output_buf, CL_TRUE, 0,
                                 2 * sizeof(cl_uint), output_result, 0, NULL, NULL);
+            if (rerr != CL_SUCCESS) {
+                kernel_errors++;
+                if (kernel_errors <= 3 || (kernel_errors % 50) == 0)
+                    fprintf(stderr, "[DagTech GPU] GPU %d result read failed "
+                            "(clEnqueueReadBuffer=%d, count=%llu) - not counting batch.\n",
+                            gpu_idx, rerr, (unsigned long long)kernel_errors);
+                usleep(500000);
+                break;
+            }
 
-            /* Account for hashes — aggregate and per-GPU */
+            /* Batch genuinely completed — account for hashes (aggregate + per-GPU) */
             pthread_mutex_lock(&gpu_stats_mtx);
             ctx->hashes_session += ctx->global_size;
             gpu_hashes_session  += ctx->global_size;
@@ -853,7 +994,7 @@ static void *dagtech_gpu_thread(void *arg) {
                     ((uint64_t)hash[29] << 40) | ((uint64_t)hash[28] << 32) |
                     ((uint64_t)hash[27] << 24) | ((uint64_t)hash[26] << 16) |
                     ((uint64_t)hash[25] <<  8) |  (uint64_t)hash[24];
-                double threshold_d = (double)0x0000FFFF00000000ULL / j.difficulty;
+                double threshold_d = (double)0x0000FFFF00000000ULL / dagtech_effective_diff(j.difficulty);
                 uint64_t threshold64 = (threshold_d >= 18446744073709551615.0) ?
                                         0xFFFFFFFFFFFFFFFFULL : (uint64_t)threshold_d;
 
@@ -1083,6 +1224,17 @@ static void dagtech_parse_stratum(const char *line) {
             total_rejected++;
             if (src == 1) gpu_rejected++; else if (src == 0) cpu_rejected++;
             pthread_mutex_unlock(&stats_mtx);
+            /* "Low difficulty share" (commonly error code 23) means our submit
+             * threshold is too loose. Raise the active margin so subsequent
+             * shares must be stronger, up to a sane cap. */
+            int is_lowdiff = strstr(line, "low difficulty") || strstr(line, "low diff") ||
+                             strstr(line, "\"23\"") || strstr(line, ",23,") || strstr(line, "[23,");
+            if (is_lowdiff && auto_threshold) {
+                active_margin *= 1.05;
+                if (active_margin > 8.0) active_margin = 8.0;
+                printf("[DagTech] Low-difficulty reject -> submit margin now %.3f\n",
+                       active_margin);
+            }
             printf("[DagTech] Share REJECTED: %s\n", line);
         }
     }
@@ -1221,7 +1373,7 @@ static int dagtech_check_target(const uint8_t *hash, double difficulty) {
                           ((uint64_t)hash[29] << 40) | ((uint64_t)hash[28] << 32) |
                           ((uint64_t)hash[27] << 24) | ((uint64_t)hash[26] << 16) |
                           ((uint64_t)hash[25] <<  8) |  (uint64_t)hash[24];
-    double threshold_d = (double)0x0000FFFF00000000ULL / difficulty;
+    double threshold_d = (double)0x0000FFFF00000000ULL / dagtech_effective_diff(difficulty);
     uint64_t threshold64 = (threshold_d >= 18446744073709551615.0) ?
                             0xFFFFFFFFFFFFFFFFULL : (uint64_t)threshold_d;
     return hash_top64 <= threshold64;
@@ -1422,6 +1574,8 @@ static void *dagtech_metrics_thread(void *arg) {
             "\"wallet\":\"%.10s...%s\","
             "\"wallet_full\":\"%s\","
             "\"worker\":\"%s\","
+            "\"cpu_name\":\"%s\","
+            "\"cpu_cores\":%d,"
             "\"threads\":%d,"
             "\"hashrate\":%.2f,"
             "\"cpu_hashrate\":%.2f,"
@@ -1450,6 +1604,7 @@ static void *dagtech_metrics_thread(void *arg) {
             wallet, wallet + strlen(wallet) - 4,
             wallet,
             worker_name,
+            g_cpu_brand, g_cpu_cores,
             num_threads, current_hashrate, cpu_hashrate, gpu_hashrate,
             (unsigned long long)total_hashes,
             (unsigned long long)total_submitted,
@@ -1514,6 +1669,8 @@ static void dagtech_usage(void) {
     printf("    --threads <n>          Number of CPU mining threads (default: auto)\n");
     printf("    --worker <name>        Worker name (default: dagtech)\n");
     printf("    --password <pw>        Pool password (default: x)\n");
+    printf("    --submit-margin <f>    Share threshold margin >=1.0 (default: 1.0)\n");
+    printf("    --no-auto-threshold    Don't auto-raise margin after low-difficulty rejects\n");
     printf("    --cpu-limit <n>        CPU usage limit percent per thread (1-100, default: 100)\n");
     printf("    --low-priority         Run at lowest CPU priority\n");
     printf("    --metrics-port <n>     Metrics HTTP port (default: %d)\n", metrics_port);
@@ -1596,6 +1753,8 @@ static void dagtech_load_config(const char *path) {
         else if (strcmp(key, "THREADS")      == 0) num_threads   = atoi(val);
         else if (strcmp(key, "WORKER")       == 0) strncpy(worker_name,  val, sizeof(worker_name)  - 1);
         else if (strcmp(key, "PASSWORD")     == 0) strncpy(password,     val, sizeof(password)     - 1);
+        else if (strcmp(key, "SUBMIT_MARGIN")== 0) { submit_margin = atof(val); if (submit_margin < 1.0) submit_margin = 1.0; if (submit_margin > 8.0) submit_margin = 8.0; }
+        else if (strcmp(key, "AUTO_THRESHOLD")==0) auto_threshold = atoi(val);
         else if (strcmp(key, "LOW_PRIORITY") == 0) cpu_priority  = atoi(val);
         else if (strcmp(key, "CPU_LIMIT")    == 0) { cpu_limit = atoi(val); if (cpu_limit < 1) cpu_limit = 1; if (cpu_limit > 100) cpu_limit = 100; }
         else if (strcmp(key, "GPU_THROTTLE") == 0) { gpu_throttle = atoi(val); if (gpu_throttle < 1) gpu_throttle = 1; if (gpu_throttle > 100) gpu_throttle = 100; }
@@ -1659,6 +1818,8 @@ static int dagtech_save_config(const char *path) {
     fprintf(f, "THREADS=%d\n",       num_threads);
     fprintf(f, "WORKER=%s\n",        worker_name);
     fprintf(f, "PASSWORD=%s\n",      password);
+    fprintf(f, "SUBMIT_MARGIN=%.3f\n", submit_margin);
+    fprintf(f, "AUTO_THRESHOLD=%d\n",  auto_threshold);
     fprintf(f, "LOW_PRIORITY=%d\n",  cpu_priority);
     fprintf(f, "CPU_LIMIT=%d\n",     cpu_limit);
     fprintf(f, "GPU_THROTTLE=%d\n",  gpu_throttle);
@@ -1692,21 +1853,77 @@ static int dagtech_save_config(const char *path) {
 }
 
 /* =========================================================================
- * Auto-detect CPU thread count
+ * CPU detection (logical core count + brand string)
  * ========================================================================= */
-static int dagtech_detect_threads(void) {
+static int dagtech_detect_cores(void) {
     int cores = 1;
     #ifdef _WIN32
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    cores = si.dwNumberOfProcessors;
+    cores = (int)si.dwNumberOfProcessors;
     #elif defined(__linux__)
-    cores = sysconf(_SC_NPROCESSORS_ONLN);
+    cores = (int)sysconf(_SC_NPROCESSORS_ONLN);
     #elif defined(__APPLE__)
     size_t len = sizeof(cores);
     sysctlbyname("hw.logicalcpu", &cores, &len, NULL, 0);
     #endif
-    int threads = cores / 2;
+    if (cores < 1) cores = 1;
+    return cores;
+}
+
+/* Best-effort CPU brand string. Writes "Unknown CPU" if it can't be read. */
+static void dagtech_cpu_brand(char *out, size_t outsz) {
+    if (!out || outsz == 0) return;
+    out[0] = '\0';
+#if defined(__APPLE__)
+    {
+        size_t len = outsz;
+        if (sysctlbyname("machdep.cpu.brand_string", out, &len, NULL, 0) == 0 && out[0])
+            return;
+        out[0] = '\0';
+    }
+#endif
+#if defined(_MSC_VER)
+    {
+        int cpui[4];
+        char brand[49];
+        __cpuid(cpui, 0x80000000);
+        if ((unsigned int)cpui[0] >= 0x80000004u) {
+            for (int i = 0; i < 3; i++) { __cpuid(cpui, 0x80000002 + i); memcpy(brand + i*16, cpui, 16); }
+            brand[48] = '\0';
+            char *p = brand; while (*p == ' ') p++;
+            size_t blen = strlen(p);
+            while (blen > 0 && p[blen-1] == ' ') p[--blen] = '\0';
+            snprintf(out, outsz, "%s", p);
+            return;
+        }
+    }
+#elif defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+    {
+        char brand[49];
+        unsigned int regs[12];
+        if (__get_cpuid_max(0x80000000u, NULL) >= 0x80000004u) {
+            __get_cpuid(0x80000002u, &regs[0], &regs[1], &regs[2],  &regs[3]);
+            __get_cpuid(0x80000003u, &regs[4], &regs[5], &regs[6],  &regs[7]);
+            __get_cpuid(0x80000004u, &regs[8], &regs[9], &regs[10], &regs[11]);
+            memcpy(brand, regs, 48);
+            brand[48] = '\0';
+            char *p = brand; while (*p == ' ') p++;
+            size_t blen = strlen(p);
+            while (blen > 0 && p[blen-1] == ' ') p[--blen] = '\0';
+            snprintf(out, outsz, "%s", p);
+            return;
+        }
+    }
+#endif
+    if (!out[0]) snprintf(out, outsz, "Unknown CPU");
+}
+
+/* =========================================================================
+ * Auto-detect CPU thread count (half the logical cores, minimum 1)
+ * ========================================================================= */
+static int dagtech_detect_threads(void) {
+    int threads = dagtech_detect_cores() / 2;
     if (threads < 1) threads = 1;
     return threads;
 }
@@ -1750,6 +1967,13 @@ int main(int argc, char **argv) {
             strncpy(worker_name, argv[++i], sizeof(worker_name) - 1);
         else if (strcmp(argv[i], "--password") == 0 && i + 1 < argc)
             strncpy(password, argv[++i], sizeof(password) - 1);
+        else if (strcmp(argv[i], "--submit-margin") == 0 && i + 1 < argc) {
+            submit_margin = atof(argv[++i]);
+            if (submit_margin < 1.0) submit_margin = 1.0;
+            if (submit_margin > 8.0) submit_margin = 8.0;
+        }
+        else if (strcmp(argv[i], "--no-auto-threshold") == 0)
+            auto_threshold = 0;
         else if (strcmp(argv[i], "--cpu-limit") == 0 && i + 1 < argc) {
             cpu_limit = atoi(argv[++i]);
             if (cpu_limit < 1)   cpu_limit = 1;
@@ -1846,9 +2070,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[DagTech] WARNING: Wallet format looks unusual (expected 0x + 40 hex chars)\n");
     }
 
+    /* Detect CPU model + logical core count for display (matches installer). */
+    g_cpu_cores = dagtech_detect_cores();
+    dagtech_cpu_brand(g_cpu_brand, sizeof(g_cpu_brand));
+
     /* Auto-detect threads if not specified */
     if (num_threads <= 0)
         num_threads = dagtech_detect_threads();
+
+    /* Seed the adaptive margin from the configured base. */
+    active_margin = submit_margin;
 
     /* Set low priority if requested */
     if (cpu_priority) {
@@ -1860,6 +2091,8 @@ int main(int argc, char **argv) {
         printf("[DagTech] Running at LOW CPU priority\n");
     }
 
+    printf("[DagTech] CPU:     %s\n", g_cpu_brand);
+    printf("[DagTech] Cores:   %d logical (CPU thread range 1-%d)\n", g_cpu_cores, g_cpu_cores);
     printf("[DagTech] Wallet:  %s\n", wallet);
     printf("[DagTech] Pool:    %s:%d\n", pool_host, pool_port);
     printf("[DagTech] Threads: %d (CPU)\n", num_threads);
