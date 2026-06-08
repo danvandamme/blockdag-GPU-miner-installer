@@ -372,6 +372,22 @@
         .offline-banner.visible { display: flex; }
         .offline-banner span { color: var(--text-secondary); }
 
+        /* Autotune-in-progress banner (amber — same shape as the offline banner) */
+        .autotune-banner {
+            display: none;
+            background: hsla(38, 95%, 55%, 0.10);
+            border: 1px solid hsla(38, 95%, 55%, 0.30);
+            border-radius: 10px;
+            padding: 10px 16px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            color: #fbbf24;
+            align-items: center;
+            gap: 10px;
+        }
+        .autotune-banner.visible { display: flex; }
+        .autotune-banner span { color: var(--text-secondary); }
+
         .btn-config { background: hsla(210, 100%, 56%, 0.1); color: var(--blue-light); border-color: hsla(210, 100%, 56%, 0.25); }
         .btn-config:hover { background: hsla(210, 100%, 56%, 0.2); }
         .btn-logs   { background: hsla(174, 72%, 45%, 0.12); color: hsl(174, 72%, 55%); border-color: hsla(174, 72%, 45%, 0.28); }
@@ -599,6 +615,11 @@
         <!-- Offline banner -->
         <div class="offline-banner" id="offlineBanner">
             &#9888; Miner offline &mdash; <span id="offlineSince"></span>
+        </div>
+
+        <!-- Autotune-in-progress banner -->
+        <div class="autotune-banner" id="autotuneBanner">
+            &#9881; Autotune in progress &mdash; <span id="autotuneBannerText"></span>
         </div>
 
         <!-- Config Modal -->
@@ -2227,6 +2248,26 @@
             btn.disabled = false; btn.innerHTML = orig;
         }
 
+        // Global amber banner shown while a tuning sweep is running (independent
+        // of the Config modal). Driven by /autotune-status's running/trial/total.
+        async function pollAutotuneBanner() {
+            const banner = document.getElementById('autotuneBanner');
+            if (!banner) return;
+            try {
+                const r = await fetch(`${CONTROL_URL}/autotune-status`, { signal: AbortSignal.timeout(4000) });
+                if (!r.ok) { banner.classList.remove('visible'); return; }
+                const d = await r.json();
+                if (d.running) {
+                    const prog = (d.trial && d.total) ? ` &mdash; trial ${d.trial}/${d.total}` : '';
+                    document.getElementById('autotuneBannerText').innerHTML =
+                        `benchmarking GPU work sizes${prog}. Hashrate is temporary until it finishes.`;
+                    banner.classList.add('visible');
+                } else {
+                    banner.classList.remove('visible');
+                }
+            } catch (e) { /* leave banner as-is on transient error */ }
+        }
+
         document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeConfig(); closeLogs(); } });
 
         // Initialize
@@ -2238,8 +2279,10 @@
         // never fires at the same time as fetchMetrics and blocks the /status check.
         setTimeout(() => { fetchSysinfo(); setInterval(fetchSysinfo, 15000); }, 3000);
         setInterval(refreshLastShareAge, 1000);
+        pollAutotuneBanner();
+        setInterval(pollAutotuneBanner, 5000);
 
-        addLog('DagTech GPU Dashboard v1.2.0 - dagtech.network');
+        addLog('DagTech GPU Dashboard v1.3.0 - dagtech.network');
         addLog('Polling miner metrics every 5 seconds...');
     </script>
 </body>

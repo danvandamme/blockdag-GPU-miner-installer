@@ -914,8 +914,25 @@ while ($listener.IsListening) {
                         elseif ($l -match '^selected_mode=(\w+)')      { $mode  = $Matches[1] }
                     }
                 }
+                # Detect an in-progress sweep from the miner log tail. The latest
+                # [Autotune] line tells the state: a "trial X/Y" or "trial X done"
+                # line means it's tuning; WINNER/cache saved/applied/cache hit/off
+                # mean it's idle. This also yields live trial X/Y progress.
+                $running = $false; $trial = 0; $total = 0
+                $logFile = Get-ChildItem $script:LOGDIR -Filter "miner_*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+                if ($logFile) {
+                    $tail = @(Get-Content $logFile.FullName -Tail 80 -ErrorAction SilentlyContinue)
+                    foreach ($l in $tail) { if ($l -match '=\s*(\d+)\s*trials') { $total = [int]$Matches[1] } }
+                    $lastAt = $null
+                    for ($i = $tail.Count - 1; $i -ge 0; $i--) { if ($tail[$i] -match '\[Autotune\]') { $lastAt = $tail[$i]; break } }
+                    if ($lastAt) {
+                        if     ($lastAt -match 'trial (\d+)/(\d+)') { $running = $true; $trial = [int]$Matches[1]; $total = [int]$Matches[2] }
+                        elseif ($lastAt -match 'trial (\d+) done')  { $running = $true; $trial = [int]$Matches[1] }
+                        elseif ($lastAt -match 'running trials|x \d+ modes =') { $running = $true }
+                    }
+                }
                 $enabled = if ($cfg["AUTOTUNE"] -eq "1") { 'true' } else { 'false' }
-                Send-Response $ctx ('{"enabled":' + $enabled + ',"valid":' + ($valid.ToString().ToLower()) + ',"batchsize":' + $bs + ',"mode":"' + $mode + '"}')
+                Send-Response $ctx ('{"enabled":' + $enabled + ',"valid":' + ($valid.ToString().ToLower()) + ',"batchsize":' + $bs + ',"mode":"' + $mode + '","running":' + ($running.ToString().ToLower()) + ',"trial":' + $trial + ',"total":' + $total + '}')
                 break
             }
             "/gpu-stats" {
