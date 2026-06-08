@@ -15,7 +15,7 @@
  *
  * Author:  Dawie Nel <dawie@dagtech.network>
  * Project: DagTech Mining Suite
- * Version: GPU-2026.0608.1
+ * Version: GPU-2026.0608.2
  */
 
 #ifdef _WIN32
@@ -92,7 +92,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0608.1"
+#define DAGTECH_VERSION       "GPU-2026.0608.2"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -2498,10 +2498,59 @@ static void dagtech_usage(void) {
 /* =========================================================================
  * Config Save / Load
  * ========================================================================= */
-static const char *dagtech_default_config_path(void) {
-    static char path[512];
+static int dagtech_file_exists(const char *p) {
+    FILE *f = fopen(p, "r");
+    if (f) { fclose(f); return 1; }
+    return 0;
+}
+
+/* Resolve the config.env path. Search order (first existing file wins):
+ *   1. <exedir>/config.env          - next to the binary (e.g. install\bin\)
+ *   2. <exedir>/../config.env       - install root, where the installer writes it
+ *   3. ./config.env                 - current working directory
+ *   4. $USERPROFILE/dagtech-gpu-miner/config.env  - legacy location (back-compat)
+ * If none exist, returns (4) so any "not found" message points somewhere sane.
+ * exe_path is typically argv[0]; pass NULL to skip the exe-relative candidates. */
+static const char *dagtech_default_config_path(const char *exe_path) {
+    static char path[1024];
     if (path[0]) return path;
 
+    /* Derive the executable's directory (with trailing separator) from exe_path. */
+    char dir[1024];
+    char ps = '/';
+    dir[0] = '\0';
+    if (exe_path && exe_path[0]) {
+        strncpy(dir, exe_path, sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = '\0';
+        char *sep = strrchr(dir, '/');
+#ifdef _WIN32
+        { char *sep2 = strrchr(dir, '\\'); if (sep2 > sep) sep = sep2; }
+#endif
+        if (sep) { ps = *sep; *(sep + 1) = '\0'; }  /* keep trailing separator */
+        else dir[0] = '\0';
+    }
+
+    char cand[1024];
+
+    /* 1. <exedir>/config.env */
+    if (dir[0]) {
+        snprintf(cand, sizeof(cand), "%sconfig.env", dir);
+        if (dagtech_file_exists(cand)) { strncpy(path, cand, sizeof(path) - 1); return path; }
+    }
+
+    /* 2. <exedir>/../config.env  (install root, e.g. C:\dagtech-gpu-miner\config.env) */
+    if (dir[0]) {
+        snprintf(cand, sizeof(cand), "%s..%cconfig.env", dir, ps);
+        if (dagtech_file_exists(cand)) { strncpy(path, cand, sizeof(path) - 1); return path; }
+    }
+
+    /* 3. ./config.env */
+    if (dagtech_file_exists("config.env")) {
+        strncpy(path, "config.env", sizeof(path) - 1);
+        return path;
+    }
+
+    /* 4. legacy $USERPROFILE/dagtech-gpu-miner/config.env */
     const char *home = NULL;
 #ifdef _WIN32
     home = getenv("USERPROFILE");
@@ -2772,7 +2821,7 @@ int main(int argc, char **argv) {
     signal(SIGTERM, dagtech_signal);
 
     /* ---- Pass 1: look for --config <path> before loading defaults ---- */
-    const char *config_path = dagtech_default_config_path();
+    const char *config_path = dagtech_default_config_path(argv[0]);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_path = argv[++i];

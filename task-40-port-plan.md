@@ -1,6 +1,6 @@
 # Task #40 — Coalesce V-buffer (port plan)
 
-**Status:** ✅ SHIPPED as **GPU-2026.0608.1**. Increments 1–3 of #40 plus #42 (autotune) are complete.
+**Status:** ✅ SHIPPED as **GPU-2026.0608.2**. Increments 1–3 of #40 plus #42 (autotune); `.2` adds two operational fixes (config-path resolution, legacy-task cleanup).
 **Baseline:** GPU-2026.0607.2 on RTX 4060 Laptop (8 GB), 129 KH/s GPU + 9 KH/s CPU, shares 90/91 accepted.
 
 ### Release GPU-2026.0608.1 — what shipped
@@ -14,9 +14,11 @@
 
 **Portability stance:** OpenCL 1.2, no vendor intrinsics; everything NVIDIA-specific (e.g. any future `nvidia-smi` telemetry) stays optional and degrades silently. The `.cl` kernel is loaded at runtime next to the exe, so it must ship alongside the binary (the installer copies it on both build-from-source and prebuilt paths).
 
+### Operational fixes (GPU-2026.0608.2)
+- **Config path resolution — FIXED.** `dagtech_default_config_path()` previously looked only under `$USERPROFILE/dagtech-gpu-miner/config.env`, but the installer writes `config.env` to the install root `C:\dagtech-gpu-miner\`, so the miner never auto-loaded it (only env-var / CLI workarounds worked). Now it takes `argv[0]` and searches, first-existing-wins: (1) `<exedir>/config.env`, (2) `<exedir>/../config.env` (install root — where the installer writes it), (3) `./config.env`, (4) `$USERPROFILE/dagtech-gpu-miner/config.env` (legacy fallback, kept for back-compat). Validated: a `config.env` placed in the install root is now loaded automatically.
+- **Legacy scheduled-task cleanup — ADDED.** The installer source is internally consistent at task name `DagTech GPU Miner`, so fresh installs were never actually broken. But machines carrying an older `DagTech Miner` task (e.g. the original dev box) could orphan it on upgrade and double-launch. The installer and uninstaller now also `Unregister` any legacy `DagTech Miner` task. Harmless no-op on machines without one.
+
 ### Known follow-ups (not blocking this release)
-- `dagtech_default_config_path()` looks under `$USERPROFILE/dagtech-gpu-miner/config.env` instead of the install root `C:\dagtech-gpu-miner\` — config.env isn't auto-loaded on scheduled-task launch; worked around with env vars / CLI args.
-- Scheduled task is named `DagTech Miner`, but some install/control scripts assume `DagTech GPU Miner`.
 - Branding rename (DagTech → generic "bdag miner", credit DagTech original + DVD Mining modifications) — parked for a future session with a fresh repo.
 **Validation rule (from CLAUDE.md):** every increment must produce **real H/s + accepted shares** before merging. The host-side `<2 ms` "implausibly fast" guard in `dagtech_gpu_thread` (around `dagtech_miner.c:927`) is the trip wire — if a kernel batch completes in under 2 ms, hashes aren't counted (driver-reset / fast-fail symptom).
 

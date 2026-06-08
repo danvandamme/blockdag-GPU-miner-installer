@@ -45,7 +45,10 @@ echo   [Uninstall] Removing scheduled task...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Disable-ScheduledTask  -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue | Out-Null;" ^
     "Stop-ScheduledTask     -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
-    "Unregister-ScheduledTask -TaskName 'DagTech GPU Miner' -Confirm:$false -ErrorAction SilentlyContinue" >nul 2>&1
+    "Unregister-ScheduledTask -TaskName 'DagTech GPU Miner' -Confirm:$false -ErrorAction SilentlyContinue;" ^
+    "Disable-ScheduledTask  -TaskName 'DagTech Miner' -ErrorAction SilentlyContinue | Out-Null;" ^
+    "Stop-ScheduledTask     -TaskName 'DagTech Miner' -ErrorAction SilentlyContinue;" ^
+    "Unregister-ScheduledTask -TaskName 'DagTech Miner' -Confirm:$false -ErrorAction SilentlyContinue" >nul 2>&1
 echo   [Uninstall] Scheduled task removed.
 
 REM 3. Kill running processes (binary, control server by cmdline, and by pid file)

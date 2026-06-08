@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0608.1"
+set "VERSION=GPU-2026.0608.2"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -777,6 +777,13 @@ echo.
 
 REM Remove old Startup-folder shortcut if present
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$lnk=[IO.Path]::Combine($env:APPDATA,'Microsoft\Windows\Start Menu\Programs\Startup\DagTech GPU Miner.lnk'); if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host '[GPU Miner] Removed old startup shortcut.' }" 2>nul
+
+REM Remove any legacy-named scheduled task from older installs so it can't
+REM orphan and double-launch the miner alongside the current "DagTech GPU Miner" task.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "Disable-ScheduledTask    -TaskName 'DagTech Miner' -ErrorAction SilentlyContinue | Out-Null;" ^
+    "Stop-ScheduledTask       -TaskName 'DagTech Miner' -ErrorAction SilentlyContinue;" ^
+    "Unregister-ScheduledTask -TaskName 'DagTech Miner' -Confirm:$false -ErrorAction SilentlyContinue" >nul 2>&1
 
 REM Stop existing task and control server before re-registering
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
