@@ -331,19 +331,42 @@ static void xor_salsa8(__private uint B[16], __private const uint Bx[16])
  *
  * V_slice is the work-item's own 1024*32 uint slice of the global V buffer.
  * X[0..31] is the 128-byte scrypt block in private memory.
+ *
+ * GPU-2026.0607.3 (#40 increment 1): V access uses uint4 vector loads/stores
+ * for 16-byte memory transactions instead of 4-byte. V is clCreateBuffer-
+ * allocated (page-aligned) and gid*1024*32 + i*32 is always a multiple of
+ * 32 uints = 128 bytes, so the __global uint4* cast is well-aligned.
+ * Algorithm and data flow unchanged - pool acceptance preserved.
  * ========================================================================= */
 static void scrypt_romix(__private uint X[32], __global uint *V_slice)
 {
-    /* Fill phase */
+    /* Fill phase: 8 x uint4 stores per row (32 uints = 128 bytes = 8 x 16) */
     for (int i = 0; i < 1024; i++) {
-        for (int k = 0; k < 32; k++) V_slice[i*32 + k] = X[k];
+        __global uint4 *Vp = (__global uint4 *)(V_slice + i*32);
+        Vp[0] = (uint4)(X[ 0], X[ 1], X[ 2], X[ 3]);
+        Vp[1] = (uint4)(X[ 4], X[ 5], X[ 6], X[ 7]);
+        Vp[2] = (uint4)(X[ 8], X[ 9], X[10], X[11]);
+        Vp[3] = (uint4)(X[12], X[13], X[14], X[15]);
+        Vp[4] = (uint4)(X[16], X[17], X[18], X[19]);
+        Vp[5] = (uint4)(X[20], X[21], X[22], X[23]);
+        Vp[6] = (uint4)(X[24], X[25], X[26], X[27]);
+        Vp[7] = (uint4)(X[28], X[29], X[30], X[31]);
         xor_salsa8(&X[0],  &X[16]);
         xor_salsa8(&X[16], &X[0]);
     }
-    /* Mix phase */
+    /* Mix phase: 8 x uint4 loads per row, XOR into private X[] */
     for (int i = 0; i < 1024; i++) {
         int j = (int)(X[16] & 1023u);
-        for (int k = 0; k < 32; k++) X[k] ^= V_slice[j*32 + k];
+        __global uint4 *Vp = (__global uint4 *)(V_slice + j*32);
+        uint4 v;
+        v = Vp[0]; X[ 0] ^= v.x; X[ 1] ^= v.y; X[ 2] ^= v.z; X[ 3] ^= v.w;
+        v = Vp[1]; X[ 4] ^= v.x; X[ 5] ^= v.y; X[ 6] ^= v.z; X[ 7] ^= v.w;
+        v = Vp[2]; X[ 8] ^= v.x; X[ 9] ^= v.y; X[10] ^= v.z; X[11] ^= v.w;
+        v = Vp[3]; X[12] ^= v.x; X[13] ^= v.y; X[14] ^= v.z; X[15] ^= v.w;
+        v = Vp[4]; X[16] ^= v.x; X[17] ^= v.y; X[18] ^= v.z; X[19] ^= v.w;
+        v = Vp[5]; X[20] ^= v.x; X[21] ^= v.y; X[22] ^= v.z; X[23] ^= v.w;
+        v = Vp[6]; X[24] ^= v.x; X[25] ^= v.y; X[26] ^= v.z; X[27] ^= v.w;
+        v = Vp[7]; X[28] ^= v.x; X[29] ^= v.y; X[30] ^= v.z; X[31] ^= v.w;
         xor_salsa8(&X[0],  &X[16]);
         xor_salsa8(&X[16], &X[0]);
     }
