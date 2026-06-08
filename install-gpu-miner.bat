@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0608.4"
+set "VERSION=GPU-2026.0608.5"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -568,6 +568,8 @@ REM HTTP.sys reservation release so the new files copy and bind cleanly.
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Disable-ScheduledTask -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue | Out-Null;" ^
     "Stop-ScheduledTask   -TaskName 'DagTech GPU Miner' -ErrorAction SilentlyContinue;" ^
+    "Disable-ScheduledTask -TaskName 'DagTech Miner' -ErrorAction SilentlyContinue | Out-Null;" ^
+    "Stop-ScheduledTask   -TaskName 'DagTech Miner' -ErrorAction SilentlyContinue;" ^
     "$pidFile='%INSTALL_DIR%\logs\control.pid';" ^
     "if (Test-Path $pidFile) { $raw=(Get-Content $pidFile -Raw).Trim(); if ($raw -match '^\d+$') { try { Get-Process -Id ([int]$raw) -EA Stop | Stop-Process -Force } catch {} } };" ^
     "Get-Process -Name 'dagtech-gpu-miner' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue;" ^
