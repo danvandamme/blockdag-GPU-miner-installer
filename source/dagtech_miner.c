@@ -15,7 +15,7 @@
  *
  * Author:  Dawie Nel <dawie@dagtech.network>
  * Project: DagTech Mining Suite
- * Version: GPU-2026.0608.5
+ * Version: GPU-2026.0608.6
  */
 
 #ifdef _WIN32
@@ -92,7 +92,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0608.5"
+#define DAGTECH_VERSION       "GPU-2026.0608.6"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -1397,6 +1397,37 @@ static AutotuneTrial autotune_run_trial(GpuCtx *ctx, int requested_batchsize,
     return t;
 }
 
+/* Apply a previously-saved autotune result WITHOUT running any trials. Used when
+ * AUTOTUNE=0 so a machine that was tuned once keeps its tuned work size + kernel
+ * mode ("tune once, toggle off, keep the speed"). No-op (keeps the gpu_init
+ * defaults) when no valid cache exists for this GPU/driver/candidate set. Does
+ * not need a pool job — applying the cache is just a buffer realloc.
+ * Returns 0 on success or graceful no-op, -1 only if buffers end up unusable. */
+static int autotune_apply_cache_if_any(GpuCtx *ctx, int gpu_idx) {
+    char key[1280];
+    at_compute_cache_key(ctx, key, sizeof(key));
+    int cached_bs = 0, cached_mode = -1;
+    if (!autotune_load_cache(gpu_autotune_cache, key, &cached_bs, &cached_mode))
+        return 0;  /* no saved tuning for this GPU/config — keep gpu_init defaults */
+
+    printf("[Autotune] GPU %d: AUTOTUNE off; applying saved tuning (batchsize=%d, mode=%s).\n",
+           gpu_idx, cached_bs, at_mode_int_to_name(cached_mode));
+    size_t prev_bs = ctx->global_size;
+    int    prev_mode = ctx->kernel_mode;
+    if (gpu_realloc_buffers(ctx, (size_t)cached_bs, cached_mode) == 0) {
+        printf("[Autotune] GPU %d: applied saved tuning.\n", gpu_idx);
+        return 0;
+    }
+    /* Cached size didn't fit right now (rare: VRAM contention). gpu_realloc_buffers
+     * frees first, so restore the previous default allocation to stay mineable. */
+    fprintf(stderr, "[Autotune] GPU %d: saved tuning didn't fit; restoring default work size.\n", gpu_idx);
+    if (gpu_realloc_buffers(ctx, prev_bs, prev_mode) != 0) {
+        fprintf(stderr, "[Autotune] GPU %d: failed to restore buffers after cache apply.\n", gpu_idx);
+        return -1;
+    }
+    return 0;
+}
+
 /* Top-level autotune: load cache or sweep all candidates, apply winner.
  * Returns 0 on success (ctx->global_size and ctx->kernel_mode now reflect winner;
  * V_buf and X_buf allocated for the winner). Returns -1 on hard failure (no valid
@@ -1545,6 +1576,11 @@ static void *dagtech_gpu_thread(void *arg) {
         if (gpu_autotune) {
             autotune_run(ctx, gpu_idx);
         }
+    } else {
+        /* AUTOTUNE off: apply a previously-saved tuning if one exists for this
+         * GPU, so "tune once, toggle off, keep the speed" works. No trials and
+         * no job wait — applying the cache is just a buffer realloc. */
+        autotune_apply_cache_if_any(ctx, gpu_idx);
     }
 
     uint32_t nonce_base   = 0x80000000u + (uint32_t)gpu_idx * (uint32_t)ctx->global_size;

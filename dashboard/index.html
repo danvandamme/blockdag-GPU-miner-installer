@@ -702,7 +702,11 @@
                         <span>Autotune Work-Size <span style="font-size:10px;opacity:0.55;font-weight:400;">(AUTOTUNE)</span></span>
                     </label>
                     <div style="margin-top:7px;font-size:11px;line-height:1.5;padding:7px 10px;border-radius:6px;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.05);color:var(--text-dim);">
-                        On first start, briefly tests batch sizes &amp; kernel modes and caches the fastest combo for this GPU. Adds a few minutes the first time; instant afterward. Applied when the miner restarts.
+                        Tests batch sizes &amp; kernel modes and caches the fastest combo for this GPU. With the box <b>off</b>, your saved tuning is still applied &mdash; tune once, leave it off, keep the speed. With it <b>on</b>, the miner re-tunes automatically if the GPU or driver changes.
+                        <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap;">
+                            <button type="button" class="btn-modal-cancel" id="btnRunAutotune" onclick="runAutotuneNow()" style="white-space:nowrap;">&#9889; Run Autotune Now</button>
+                            <span id="autotuneStatus" style="font-size:11px;"></span>
+                        </div>
                     </div>
                 </div>
                 </div><!-- /#gpuControlsSection -->
@@ -1991,6 +1995,7 @@
                 updateThrottleHint(throttle);
                 const atEl = document.getElementById('cfgAutotune');
                 if (atEl) atEl.checked = (cfg.AUTOTUNE || '0') === '1';
+                loadAutotuneStatus();
                 setMode(cfg.MINING_MODE || 'both');
                 setStartMode(startMode);
 
@@ -2186,6 +2191,42 @@
             btn.disabled = false; btn.textContent = 'Save & Restart';
         }
 
+        async function loadAutotuneStatus() {
+            const el = document.getElementById('autotuneStatus');
+            if (!el) return;
+            el.textContent = '';
+            try {
+                const r = await fetch(`${CONTROL_URL}/autotune-status`, { signal: AbortSignal.timeout(4000) });
+                if (!r.ok) return;
+                const d = await r.json();
+                if (d.valid && d.batchsize) {
+                    el.innerHTML = '<span style="color:hsl(142,72%,55%)">&#10003; Tuned: ' + d.mode + ' @ ' + d.batchsize + '</span>';
+                } else {
+                    el.innerHTML = '<span style="color:var(--text-dim)">Not tuned yet</span>';
+                }
+            } catch (e) {}
+        }
+
+        async function runAutotuneNow() {
+            const btn = document.getElementById('btnRunAutotune');
+            const st  = document.getElementById('autotuneStatus');
+            if (!confirm('Run autotune now?\n\nThis clears the saved tuning, restarts the miner, and benchmarks batch sizes (a few minutes). The fastest result is applied and saved automatically — the miner mines at trial settings until it finishes.')) return;
+            btn.disabled = true; const orig = btn.innerHTML; btn.textContent = 'Starting...';
+            try {
+                const r = await fetch(`${CONTROL_URL}/run-autotune`, { method: 'POST', signal: AbortSignal.timeout(12000) });
+                const d = await r.json();
+                if (d.ok) {
+                    st.innerHTML = '<span style="color:hsl(45,100%,60%)">Tuning… miner restarting. Watch Logs for trial progress (~a few min); it applies automatically.</span>';
+                    if (document.getElementById('cfgAutotune')) document.getElementById('cfgAutotune').checked = true;
+                } else {
+                    st.innerHTML = '<span style="color:#f87171">' + (d.error || 'Failed to start autotune.') + '</span>';
+                }
+            } catch (e) {
+                st.innerHTML = '<span style="color:#f87171">Control server unreachable.</span>';
+            }
+            btn.disabled = false; btn.innerHTML = orig;
+        }
+
         document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeConfig(); closeLogs(); } });
 
         // Initialize
@@ -2198,7 +2239,7 @@
         setTimeout(() => { fetchSysinfo(); setInterval(fetchSysinfo, 15000); }, 3000);
         setInterval(refreshLastShareAge, 1000);
 
-        addLog('DagTech GPU Dashboard v1.1.0 - dagtech.network');
+        addLog('DagTech GPU Dashboard v1.2.0 - dagtech.network');
         addLog('Polling miner metrics every 5 seconds...');
     </script>
 </body>

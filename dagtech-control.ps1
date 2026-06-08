@@ -863,6 +863,61 @@ while ($listener.IsListening) {
                 }
                 break
             }
+            "/run-autotune" {
+                # Manual one-shot autotune: clear the cache so the miner re-sweeps,
+                # ensure AUTOTUNE=1 so the sweep actually runs, then restart. The
+                # miner benchmarks candidates, applies + re-caches the winner.
+                if ($method -eq "POST") {
+                    try {
+                        $cfg = Read-Config
+                        $cacheFile = if ($cfg["AUTOTUNE_CACHE"]) { $cfg["AUTOTUNE_CACHE"] } else { Join-Path $script:BASE "autotune.json" }
+                        if (Test-Path $cacheFile) { Remove-Item $cacheFile -Force -ErrorAction SilentlyContinue }
+                        $lines = @(Get-Content $script:CONFIG)
+                        $hasKey = $false
+                        $newLines = @(foreach ($l in $lines) {
+                            if ($l -match '^AUTOTUNE=') { $hasKey = $true; 'AUTOTUNE=1' } else { $l }
+                        })
+                        if (-not $hasKey) { $newLines += 'AUTOTUNE=1' }
+                        [System.IO.File]::WriteAllLines($script:CONFIG, $newLines, (New-Object System.Text.UTF8Encoding $false))
+                        Write-Log "Run-autotune requested: cache cleared, AUTOTUNE=1, restarting miner."
+                        $wasRunning = $null -ne (Get-MinerProcess)
+                        if ($wasRunning) {
+                            $proc = Get-MinerProcess
+                            if ($proc) { $proc | Stop-Process -Force }
+                            Start-Sleep -Milliseconds 1200
+                            if (Test-Path $script:STOPFILE) { Remove-Item $script:STOPFILE -Force }
+                            Start-MinerProcess
+                            Send-Response $ctx '{"ok":true,"restarted":true}'
+                        } else {
+                            Send-Response $ctx '{"ok":true,"restarted":false}'
+                        }
+                    } catch {
+                        $msg = $_.Exception.Message -replace '"',"'" -replace '\r?\n',' '
+                        Write-Log "Run-autotune error: $msg"
+                        Send-Response $ctx ('{"error":"' + $msg + '"}') 400
+                    }
+                } else {
+                    Send-Response $ctx '{"error":"POST required"}' 405
+                }
+                break
+            }
+            "/autotune-status" {
+                # Reports the saved tuning (from autotune.json) so the dashboard can
+                # show "Tuned: split @ 8192" without the user digging into the log.
+                $cfg = Read-Config
+                $cacheFile = if ($cfg["AUTOTUNE_CACHE"]) { $cfg["AUTOTUNE_CACHE"] } else { Join-Path $script:BASE "autotune.json" }
+                $valid = $false; $bs = 0; $mode = ""
+                if (Test-Path $cacheFile) {
+                    foreach ($l in (Get-Content $cacheFile -ErrorAction SilentlyContinue)) {
+                        if     ($l -match '^valid=(\d+)')              { $valid = ([int]$Matches[1] -ne 0) }
+                        elseif ($l -match '^selected_batchsize=(\d+)') { $bs    = [int]$Matches[1] }
+                        elseif ($l -match '^selected_mode=(\w+)')      { $mode  = $Matches[1] }
+                    }
+                }
+                $enabled = if ($cfg["AUTOTUNE"] -eq "1") { 'true' } else { 'false' }
+                Send-Response $ctx ('{"enabled":' + $enabled + ',"valid":' + ($valid.ToString().ToLower()) + ',"batchsize":' + $bs + ',"mode":"' + $mode + '"}')
+                break
+            }
             "/gpu-stats" {
                 # Background job (separate process) writes this every 4 s — main loop never blocks
                 $json = if (Test-Path $script:GpuStatsFile) {
