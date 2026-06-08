@@ -15,7 +15,7 @@
  *
  * Author:  Dawie Nel <dawie@dagtech.network>
  * Project: DagTech Mining Suite
- * Version: GPU-2026.0521.1
+ * Version: GPU-2026.0608.1
  */
 
 #ifdef _WIN32
@@ -92,7 +92,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0607.4"
+#define DAGTECH_VERSION       "GPU-2026.0608.1"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -140,6 +140,20 @@ static int g_num_gpus          = 0;  /* GPUs successfully initialised */
 /* Per-GPU intensity: GPU_INTENSITY=80,60 overrides the single global per card */
 static int gpu_intensity_list[MAX_GPUS];
 static int gpu_intensity_count = 0;  /* 0 = use gpu_intensity for all GPUs */
+
+/* #42 GPU work-size autotune (config in config.env or env-var override).
+ * When AUTOTUNE=1, the GPU thread runs short trials at startup across the
+ * Cartesian product of AUTOTUNE_BATCHES x AUTOTUNE_KERNEL_MODES, scores each
+ * (reference miner's formula: useful_hashrate * (1 - penalties)), and picks
+ * the winner. Result is cached at AUTOTUNE_CACHE and re-used on next start
+ * unless AUTOTUNE_FORCE=1 or the cache key no longer matches this GPU/config. */
+static int  gpu_autotune                = 0;     /* AUTOTUNE: 0=off (default), 1=on */
+static int  gpu_autotune_force          = 0;     /* AUTOTUNE_FORCE: 0=use cache if valid, 1=always retune */
+static int  gpu_autotune_trial_seconds  = 60;    /* AUTOTUNE_TRIAL_SECONDS: per-candidate trial duration (reference miner uses 60 minimum for noise reduction) */
+static int  gpu_target_batch_ms         = 1500;  /* TARGET_BATCH_MS: latency penalty threshold for scoring */
+static char gpu_autotune_batches[256]   = "1024,2048,4096,8192";   /* AUTOTUNE_BATCHES: comma list */
+static char gpu_autotune_modes[64]      = "split,legacy";          /* AUTOTUNE_KERNEL_MODES: comma list */
+static char gpu_autotune_cache[512]     = "C:\\dagtech-gpu-miner\\autotune.json"; /* AUTOTUNE_CACHE: file path */
 
 /* Stratum connection */
 static int sockfd = -1;
@@ -440,6 +454,11 @@ typedef struct {
     cl_kernel        kernel_pre;
     cl_kernel        kernel_romix;
     cl_kernel        kernel_post;
+    /* GPU-2026.0607.5 (#40 increment 3): cooperative 4-threads-per-hash ROMix.
+       Replaces kernel_romix when kernel_mode == 2 (coop). NULL otherwise. */
+    cl_kernel        kernel_romix_coop;
+    size_t           coop_local_size;     /* WG size for romix_coop (multiple of 4) */
+    size_t           coop_local_bytes;    /* __local L arg size: (lws/4) * 32 * sizeof(cl_uint) */
     cl_mem           V_buf;
     cl_mem           X_buf;           /* intermediate X[32]/work-item, split-mode only */
     cl_mem           output_buf;
@@ -450,7 +469,9 @@ typedef struct {
     volatile int     ready;
     char             name[256];
     int              intensity;        /* actual intensity used for this GPU */
-    int              kernel_mode;      /* 0 = legacy single-kernel, 1 = split (pre/romix/post) */
+    int              kernel_mode;      /* 0 = legacy (dagtech_search)
+                                          1 = split (pre + romix + post)
+                                          2 = coop  (pre + romix_coop + post, 4 threads/hash) */
     uint64_t         hashes_session;   /* per-GPU hash counter */
     double           hashrate;         /* per-GPU H/s updated by stats loop */
 } GpuCtx;
@@ -697,18 +718,39 @@ static int gpu_init_one(GpuCtx *ctx, cl_platform_id platform, int platform_idx,
         return -1;
     }
 
-    /* GPU-2026.0607.4 (#40 increment 2): try to set up split-kernel mode
-     * (dagtech_pre + dagtech_romix + dagtech_post). On any failure, leave
-     * kernel_mode=0 so the gpu_thread dispatches the legacy dagtech_search. */
+    /* GPU-2026.0607.4 (#40 inc 2) / GPU-2026.0607.5 (#40 inc 3):
+     * Try to set up split-kernel mode (pre + romix + post), then optionally
+     * promote to coop mode (pre + romix_coop + post, 4 threads/hash). On any
+     * failure at any level, fall back to the next tier without failing init:
+     *   coop create fails  -> stay in split
+     *   split create fails -> fall back to legacy dagtech_search
+     * GPU_KERNEL_MODE env var caps the maximum mode: "legacy"|"0" forces 0,
+     * "split"|"1" caps at 1, "coop"|"2"|unset/empty allows promotion to 2. */
     ctx->kernel_pre = ctx->kernel_romix = ctx->kernel_post = NULL;
+    ctx->kernel_romix_coop = NULL;
+    ctx->coop_local_size = 0;
+    ctx->coop_local_bytes = 0;
     ctx->X_buf = NULL;
     ctx->kernel_mode = 0;
     {
-        int want_split = 1;
+        /* Default is "split" (mode 1, +112% vs baseline on RTX 4060 Laptop).
+         * "coop" (mode 2) is an opt-in path: it adds 4-thread-per-hash
+         * cooperative Salsa20/8 via __local + barriers, but the barrier
+         * latency on portable OpenCL exceeds the parallelism savings on
+         * the tested RTX 4060 Laptop (≈80 KH/s vs split's ≈272 KH/s).
+         * The kernel is bit-identical (shares accept), so it's preserved
+         * for future tuning or for hardware where the trade-off flips
+         * (AMD with native wavefront cooperation, OpenCL 2.0 sub-groups,
+         * etc.). Use GPU_KERNEL_MODE=coop to try it. */
+        int max_mode = 1;
         const char *km = getenv("GPU_KERNEL_MODE");
-        if (km && (strcmp(km, "legacy") == 0 || strcmp(km, "0") == 0)) want_split = 0;
+        if (km) {
+            if      (strcmp(km, "legacy") == 0 || strcmp(km, "0") == 0) max_mode = 0;
+            else if (strcmp(km, "split")  == 0 || strcmp(km, "1") == 0) max_mode = 1;
+            else if (strcmp(km, "coop")   == 0 || strcmp(km, "2") == 0) max_mode = 2;
+        }
 
-        if (want_split) {
+        if (max_mode >= 1) {
             cl_int e1 = 0, e2 = 0, e3 = 0;
             ctx->kernel_pre   = clCreateKernel(ctx->program, "dagtech_pre",   &e1);
             ctx->kernel_romix = clCreateKernel(ctx->program, "dagtech_romix", &e2);
@@ -739,6 +781,35 @@ static int gpu_init_one(GpuCtx *ctx, cl_platform_id platform, int platform_idx,
         } else {
             printf("[DagTech GPU] GPU %d: legacy single-kernel mode (GPU_KERNEL_MODE=legacy)\n",
                    gpu_index);
+        }
+
+        /* Try to promote to coop mode if split succeeded and env allows. */
+        if (ctx->kernel_mode == 1 && max_mode >= 2) {
+            cl_int ce = 0;
+            ctx->kernel_romix_coop = clCreateKernel(ctx->program, "dagtech_romix_coop", &ce);
+            if (ce != CL_SUCCESS || ctx->kernel_romix_coop == NULL) {
+                fprintf(stderr, "[DagTech GPU] GPU %d: coop kernel create failed (err %d) "
+                                "— staying in split mode.\n", gpu_index, ce);
+                ctx->kernel_romix_coop = NULL;
+            } else {
+                /* Local-work-size for romix_coop: 32 = 1 NVIDIA warp = 8 hashes
+                 * per WG, all in lockstep so barrier(CLK_LOCAL_MEM_FENCE) is
+                 * essentially free (intra-warp sync, no inter-warp wait).
+                 * lws=64 (1 AMD wavefront) tested 3.2x slower on RTX 4060 due
+                 * to the 2-warp barrier cost. AMD users get a slightly higher
+                 * barrier cost but a correct execution; perf-tune later if
+                 * needed (could read CL_DEVICE_PREFERRED_VECTOR_WIDTH_INT or
+                 * sub-group size to pick optimally per device). Local memory:
+                 * 32 uints per hash * (lws/4) hashes per WG = lws*32 bytes
+                 * = 1024 bytes at lws=32. */
+                ctx->coop_local_size  = 32;
+                ctx->coop_local_bytes = (ctx->coop_local_size / 4) * 32 * sizeof(cl_uint);
+                ctx->kernel_mode = 2;
+                printf("[DagTech GPU] GPU %d: coop-kernel mode (4 threads/hash, lws=%zu, "
+                       "local=%.1f KB/WG)\n",
+                       gpu_index, ctx->coop_local_size,
+                       ctx->coop_local_bytes / 1024.0);
+            }
         }
     }
 
@@ -827,6 +898,614 @@ static void gpu_cleanup(void) {
     g_num_gpus = 0;
 }
 
+/* ============================================================================
+ * #42 GPU work-size autotune
+ *
+ * At GPU-thread startup (when AUTOTUNE=1), sweep the Cartesian product of
+ * AUTOTUNE_BATCHES x AUTOTUNE_KERNEL_MODES, score each trial using the
+ * reference miner's formula (useful hashrate - stale - lowdiff - error -
+ * latency penalties, each capped at 0.75 of base), pick the highest-scoring
+ * candidate, and persist the choice in AUTOTUNE_CACHE keyed by GPU+config.
+ *
+ * The trial harness duplicates the main loop's dispatch logic (clear comment
+ * marker below) rather than refactoring gpu_thread - keeps the working main
+ * path completely untouched while we prove the autotune machinery.
+ * ============================================================================ */
+
+#define AUTOTUNE_MAX_BATCHES 16
+#define AUTOTUNE_MAX_MODES   4
+#define AUTOTUNE_MAX_TRIALS  (AUTOTUNE_MAX_BATCHES * AUTOTUNE_MAX_MODES)
+
+typedef struct {
+    int      requested_batchsize;
+    int      actual_batchsize;  /* after gpu_fit_global_size clamping */
+    int      mode;
+    int      valid;
+    uint64_t hashes;
+    uint64_t submitted;
+    uint64_t accepted;
+    uint64_t rejected;
+    uint64_t stale;
+    double   elapsed_s;
+    double   hashrate_hps;
+    double   avg_batch_ms;
+    double   max_batch_ms;
+    double   accepted_factor;
+    double   base_score;
+    double   stale_penalty;
+    double   lowdiff_penalty;
+    double   latency_penalty;
+    double   final_score;
+    char     reason[64];
+} AutotuneTrial;
+
+/* Forward declarations of share-submission helpers used by the trial dispatch. */
+void dagtech_submit_share_ext(const DagTechJob *j, uint32_t nonce);
+static void dagtech_mkdir_parents(const char *filepath);
+
+static int at_parse_int_list(const char *s, int *out, int max_n) {
+    int n = 0;
+    char buf[256];
+    strncpy(buf, s, sizeof(buf) - 1); buf[sizeof(buf) - 1] = '\0';
+    char *tok = strtok(buf, ",");
+    while (tok && n < max_n) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        int v = atoi(tok);
+        if (v > 0) out[n++] = v;
+        tok = strtok(NULL, ",");
+    }
+    return n;
+}
+
+static int at_mode_name_to_int(const char *s) {
+    while (*s == ' ' || *s == '\t') s++;
+    if (strncmp(s, "legacy", 6) == 0 || s[0] == '0') return 0;
+    if (strncmp(s, "split",  5) == 0 || s[0] == '1') return 1;
+    if (strncmp(s, "coop",   4) == 0 || s[0] == '2') return 2;
+    return -1;
+}
+
+static const char *at_mode_int_to_name(int m) {
+    switch (m) {
+        case 0: return "legacy";
+        case 1: return "split";
+        case 2: return "coop";
+        default: return "unknown";
+    }
+}
+
+static int at_parse_mode_list(const char *s, int *out, int max_n) {
+    int n = 0;
+    char buf[128];
+    strncpy(buf, s, sizeof(buf) - 1); buf[sizeof(buf) - 1] = '\0';
+    char *tok = strtok(buf, ",");
+    while (tok && n < max_n) {
+        int m = at_mode_name_to_int(tok);
+        if (m >= 0) out[n++] = m;
+        tok = strtok(NULL, ",");
+    }
+    return n;
+}
+
+static void at_compute_cache_key(GpuCtx *ctx, char *out, size_t out_size) {
+    cl_ulong vram = 0;
+    char driver_ver[128] = "";
+    clGetDeviceInfo(ctx->device, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(vram),       &vram,       NULL);
+    clGetDeviceInfo(ctx->device, CL_DRIVER_VERSION,         sizeof(driver_ver), driver_ver,  NULL);
+    snprintf(out, out_size,
+        "autotune-v1|gpu=%s|vram=%llu|drv=%s|batches=%s|modes=%s|trial=%d",
+        ctx->name, (unsigned long long)vram, driver_ver,
+        gpu_autotune_batches, gpu_autotune_modes, gpu_autotune_trial_seconds);
+}
+
+/* Cache I/O: simple key=value lines, fits plain C with no JSON library. */
+static int autotune_load_cache(const char *path, const char *key,
+                                int *out_batchsize, int *out_mode) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[1280];
+    char cached_key[1280] = "";
+    int cached_batchsize = 0, cached_mode = -1, cached_valid = 0;
+    while (fgets(line, sizeof(line), f)) {
+        size_t l = strlen(line);
+        while (l > 0 && (line[l-1] == '\n' || line[l-1] == '\r')) line[--l] = '\0';
+        if (l == 0 || line[0] == '#') continue;
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char *k = line, *v = eq + 1;
+        if      (strcmp(k, "key") == 0) {
+            strncpy(cached_key, v, sizeof(cached_key) - 1);
+            cached_key[sizeof(cached_key) - 1] = '\0';
+        }
+        else if (strcmp(k, "selected_batchsize") == 0) cached_batchsize = atoi(v);
+        else if (strcmp(k, "selected_mode")      == 0) cached_mode = at_mode_name_to_int(v);
+        else if (strcmp(k, "valid")              == 0) cached_valid = atoi(v);
+    }
+    fclose(f);
+    if (!cached_valid)                       return 0;
+    if (strcmp(cached_key, key) != 0)         return 0;
+    if (cached_batchsize <= 0)                return 0;
+    if (cached_mode < 0)                      return 0;
+    *out_batchsize = cached_batchsize;
+    *out_mode      = cached_mode;
+    return 1;
+}
+
+static int autotune_save_cache(const char *path, const char *key,
+                                const AutotuneTrial *winner, int valid_trials) {
+    dagtech_mkdir_parents(path);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "[Autotune] WARNING: cannot write cache %s: %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+    time_t now = time(NULL);
+    fprintf(f, "# DagTech GPU miner autotune cache (#42)\n");
+    fprintf(f, "# Generated %s", ctime(&now));
+    fprintf(f, "valid=1\n");
+    fprintf(f, "key=%s\n", key);
+    fprintf(f, "selected_batchsize=%d\n",  winner->actual_batchsize);
+    fprintf(f, "requested_batchsize=%d\n", winner->requested_batchsize);
+    fprintf(f, "selected_mode=%s\n",       at_mode_int_to_name(winner->mode));
+    fprintf(f, "final_score=%.2f\n",       winner->final_score);
+    fprintf(f, "hashrate_hps=%.0f\n",      winner->hashrate_hps);
+    fprintf(f, "submitted=%llu\n",         (unsigned long long)winner->submitted);
+    fprintf(f, "accepted=%llu\n",          (unsigned long long)winner->accepted);
+    fprintf(f, "elapsed_s=%.1f\n",         winner->elapsed_s);
+    fprintf(f, "num_valid_trials=%d\n",    valid_trials);
+    fclose(f);
+    return 0;
+}
+
+/* Reallocate V_buf + X_buf for a new (batchsize, mode). Frees existing first.
+ * Returns 0 on success, -1 if any alloc fails (caller must handle: in trial
+ * harness mark the trial invalid; in apply-winner fall through to safe defaults). */
+static int gpu_realloc_buffers(GpuCtx *ctx, size_t new_batchsize, int new_mode) {
+    if (ctx->V_buf) { clReleaseMemObject(ctx->V_buf); ctx->V_buf = NULL; }
+    if (ctx->X_buf) { clReleaseMemObject(ctx->X_buf); ctx->X_buf = NULL; }
+
+    ctx->global_size = new_batchsize;
+    ctx->kernel_mode = new_mode;
+
+    cl_int err = 0;
+    size_t v_bytes = ctx->global_size * 1024 * 32 * sizeof(cl_uint);
+    ctx->V_buf = clCreateBuffer(ctx->ctx, CL_MEM_READ_WRITE, v_bytes, NULL, &err);
+    if (err != CL_SUCCESS) {
+        fprintf(stderr, "[Autotune] V_buf alloc failed at batchsize=%zu (err=%d, %.1f MB)\n",
+                ctx->global_size, err, v_bytes / (1024.0 * 1024.0));
+        return -1;
+    }
+    if (new_mode >= 1) {
+        size_t x_bytes = ctx->global_size * 32 * sizeof(cl_uint);
+        cl_int xe = 0;
+        ctx->X_buf = clCreateBuffer(ctx->ctx, CL_MEM_READ_WRITE, x_bytes, NULL, &xe);
+        if (xe != CL_SUCCESS) {
+            fprintf(stderr, "[Autotune] X_buf alloc failed at batchsize=%zu (err=%d)\n",
+                    ctx->global_size, xe);
+            clReleaseMemObject(ctx->V_buf); ctx->V_buf = NULL;
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* ----------------------------------------------------------------------------
+ * autotune_run_trial: mine for `seconds` seconds at the given (batchsize, mode),
+ * capture stats deltas, score using the reference miner's formula.
+ *
+ * IMPORTANT: the dispatch block below is a deliberate DUPLICATE of the main
+ * mining loop in dagtech_gpu_thread (kept isolated so this experimental code
+ * cannot regress the proven main path). If you change the main dispatch,
+ * mirror the change here. Marker: "AUTOTUNE TRIAL DISPATCH".
+ * ---------------------------------------------------------------------------- */
+static AutotuneTrial autotune_run_trial(GpuCtx *ctx, int requested_batchsize,
+                                         int mode, int seconds, int gpu_idx) {
+    AutotuneTrial t;
+    memset(&t, 0, sizeof(t));
+    t.requested_batchsize = requested_batchsize;
+    t.mode = mode;
+    strncpy(t.reason, "unknown", sizeof(t.reason) - 1);
+
+    /* Clamp to what device can allocate; mark invalid if even minimum doesn't fit */
+    size_t fitted = gpu_fit_global_size(ctx->device, (size_t)requested_batchsize, gpu_idx);
+    t.actual_batchsize = (int)fitted;
+    if (fitted < (size_t)1 << 10) {
+        strncpy(t.reason, "batchsize_too_small_after_fit", sizeof(t.reason) - 1);
+        return t;
+    }
+
+    /* Allocate buffers for this candidate (frees prior allocation) */
+    if (gpu_realloc_buffers(ctx, fitted, mode) != 0) {
+        strncpy(t.reason, "alloc_failed", sizeof(t.reason) - 1);
+        return t;
+    }
+
+    /* CPU verify scratch (same as main loop) */
+    uint32_t *V_cpu = (uint32_t *)malloc(SCRYPT_N * 128);
+    if (!V_cpu) {
+        strncpy(t.reason, "verify_buf_alloc_failed", sizeof(t.reason) - 1);
+        return t;
+    }
+
+    /* Snapshot global stats before */
+    pthread_mutex_lock(&gpu_stats_mtx);
+    uint64_t hashes_before = gpu_hashes_session;
+    pthread_mutex_unlock(&gpu_stats_mtx);
+    pthread_mutex_lock(&stats_mtx);
+    uint64_t sub_before   = gpu_submitted;
+    uint64_t acc_before   = gpu_accepted;
+    uint64_t rej_before   = gpu_rejected;
+    uint64_t stale_before = gpu_stale;
+    pthread_mutex_unlock(&stats_mtx);
+
+    uint64_t trial_t0    = dagtech_now_ms();
+    uint64_t trial_end   = trial_t0 + (uint64_t)seconds * 1000ULL;
+    uint64_t batch_count = 0;
+    uint64_t batch_ms_total = 0;
+    long long max_batch_ms = 0;
+
+    uint32_t nonce_base   = 0x80000000u + (uint32_t)gpu_idx * (uint32_t)ctx->global_size;
+    uint32_t nonce_stride = (uint32_t)g_num_gpus * (uint32_t)ctx->global_size;
+    if (nonce_stride == 0) nonce_stride = (uint32_t)ctx->global_size;
+
+    cl_mem header_buf = NULL;
+    uint64_t job_seq_local = 0;
+    cl_uint target32 = 0;
+    uint8_t header80[80];
+
+    while (running && dagtech_now_ms() < trial_end) {
+        /* Get current job */
+        DagTechJob j;
+        pthread_mutex_lock(&job_mtx);
+        j = current_job;
+        pthread_mutex_unlock(&job_mtx);
+        if (!j.valid) { usleep(100000); continue; }
+
+        if (j.seq != job_seq_local) {
+            /* New job: rebuild header_buf + target32 (mirrors main loop) */
+            if (header_buf) { clReleaseMemObject(header_buf); header_buf = NULL; }
+
+            uint8_t version_b[4], prevhash[32], ntime_b[4], bits_b[4];
+            uint8_t en1[4], en2[4], en_combined[8], merkle[32];
+            if (strlen(j.version) != 8 || strlen(j.prevhash) < 64 ||
+                strlen(j.ntime) != 8 || strlen(j.bits) != 8 ||
+                strlen(j.extranonce1) != 8) { usleep(100000); continue; }
+            hex_to_bytes(j.version,    version_b, 4);
+            hex_to_bytes(j.prevhash,   prevhash, 32);
+            hex_to_bytes(j.ntime,      ntime_b,  4);
+            hex_to_bytes(j.bits,       bits_b,   4);
+            hex_to_bytes(j.extranonce1, en1,     4);
+            memset(en2, 0, 4);
+            memcpy(en_combined, en1, 4);
+            memcpy(en_combined + 4, en2, 4);
+            sha256d(en_combined, 8, merkle);
+            memcpy(header80,      version_b, 4);
+            memcpy(header80 + 4,  prevhash, 32);
+            memcpy(header80 + 36, merkle,   32);
+            memcpy(header80 + 68, ntime_b,  4);
+            memcpy(header80 + 72, bits_b,   4);
+            memset(header80 + 76, 0, 4);
+
+            cl_uint header_words[20];
+            memcpy(header_words, header80, 80);
+            double diff = dagtech_effective_diff(j.difficulty);
+            double thresh_d = (double)0x0000FFFF00000000ULL / diff;
+            uint64_t thresh64 = (thresh_d >= 18446744073709551615.0) ? 0xFFFFFFFFFFFFFFFFULL : (uint64_t)thresh_d;
+            target32 = (cl_uint)(thresh64 >> 32);
+
+            cl_int herr = 0;
+            header_buf = clCreateBuffer(ctx->ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+                                         20 * sizeof(cl_uint), header_words, &herr);
+            if (!header_buf || herr != CL_SUCCESS) { usleep(100000); continue; }
+            job_seq_local = j.seq;
+        }
+
+        /* ====== BEGIN AUTOTUNE TRIAL DISPATCH (mirrors gpu_thread main loop) ====== */
+        cl_uint output_init[2] = { 0xFFFFFFFFu, 0 };
+        clEnqueueWriteBuffer(ctx->queue, ctx->output_buf, CL_TRUE, 0,
+                             2 * sizeof(cl_uint), output_init, 0, NULL, NULL);
+
+        uint64_t gpu_t0 = dagtech_now_ms();
+        cl_event ev = NULL;
+        cl_int err;
+        if (ctx->kernel_mode >= 1) {
+            clSetKernelArg(ctx->kernel_pre, 0, sizeof(cl_mem),  &header_buf);
+            clSetKernelArg(ctx->kernel_pre, 1, sizeof(cl_mem),  &ctx->X_buf);
+            clSetKernelArg(ctx->kernel_pre, 2, sizeof(cl_uint), &nonce_base);
+            err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_pre, 1, NULL,
+                                         &ctx->global_size, NULL, 0, NULL, NULL);
+            if (err == CL_SUCCESS) {
+                if (ctx->kernel_mode == 2) {
+                    size_t coop_gws = ctx->global_size * 4;
+                    clSetKernelArg(ctx->kernel_romix_coop, 0, sizeof(cl_mem), &ctx->X_buf);
+                    clSetKernelArg(ctx->kernel_romix_coop, 1, sizeof(cl_mem), &ctx->V_buf);
+                    clSetKernelArg(ctx->kernel_romix_coop, 2, ctx->coop_local_bytes, NULL);
+                    err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_romix_coop, 1, NULL,
+                                                 &coop_gws, &ctx->coop_local_size, 0, NULL, NULL);
+                } else {
+                    clSetKernelArg(ctx->kernel_romix, 0, sizeof(cl_mem), &ctx->X_buf);
+                    clSetKernelArg(ctx->kernel_romix, 1, sizeof(cl_mem), &ctx->V_buf);
+                    err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_romix, 1, NULL,
+                                                 &ctx->global_size, NULL, 0, NULL, NULL);
+                }
+            }
+            if (err == CL_SUCCESS) {
+                clSetKernelArg(ctx->kernel_post, 0, sizeof(cl_mem),  &ctx->X_buf);
+                clSetKernelArg(ctx->kernel_post, 1, sizeof(cl_mem),  &header_buf);
+                clSetKernelArg(ctx->kernel_post, 2, sizeof(cl_mem),  &ctx->output_buf);
+                clSetKernelArg(ctx->kernel_post, 3, sizeof(cl_uint), &target32);
+                clSetKernelArg(ctx->kernel_post, 4, sizeof(cl_uint), &nonce_base);
+                err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_post, 1, NULL,
+                                             &ctx->global_size, NULL, 0, NULL, &ev);
+            }
+        } else {
+            clSetKernelArg(ctx->kernel, 0, sizeof(cl_mem),  &header_buf);
+            clSetKernelArg(ctx->kernel, 1, sizeof(cl_mem),  &ctx->output_buf);
+            clSetKernelArg(ctx->kernel, 2, sizeof(cl_mem),  &ctx->V_buf);
+            clSetKernelArg(ctx->kernel, 3, sizeof(cl_uint), &target32);
+            clSetKernelArg(ctx->kernel, 4, sizeof(cl_uint), &nonce_base);
+            err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel, 1, NULL,
+                                         &ctx->global_size, NULL, 0, NULL, &ev);
+        }
+        if (err != CL_SUCCESS) { usleep(200000); continue; }
+
+        cl_int werr = clWaitForEvents(1, &ev);
+        clReleaseEvent(ev);
+        long long batch_ms = (long long)(dagtech_now_ms() - gpu_t0);
+        if (werr != CL_SUCCESS) { usleep(200000); continue; }
+        if (batch_ms < 2) { usleep(200000); continue; }  /* implausibly-fast guard */
+
+        cl_uint output_result[2] = { 0xFFFFFFFFu, 0 };
+        cl_int rerr = clEnqueueReadBuffer(ctx->queue, ctx->output_buf, CL_TRUE, 0,
+                                          2 * sizeof(cl_uint), output_result, 0, NULL, NULL);
+        if (rerr != CL_SUCCESS) { usleep(200000); continue; }
+
+        /* Account for hashes (global counters - same as main loop) */
+        pthread_mutex_lock(&gpu_stats_mtx);
+        ctx->hashes_session += ctx->global_size;
+        gpu_hashes_session  += ctx->global_size;
+        pthread_mutex_unlock(&gpu_stats_mtx);
+        pthread_mutex_lock(&stats_mtx);
+        total_hashes += ctx->global_size;
+        pthread_mutex_unlock(&stats_mtx);
+
+        batch_count++;
+        batch_ms_total += (uint64_t)batch_ms;
+        if (batch_ms > max_batch_ms) max_batch_ms = batch_ms;
+
+        /* Apply GPU_THROTTLE duty-cycle sleep — mirrors the main loop. Without
+         * this, trials run at 100% duty cycle while the live miner runs at
+         * gpu_throttle% — measured hashrate would be inflated by 1/throttle. */
+        if (gpu_throttle < 100 && batch_ms > 0) {
+            long long sleep_ms = batch_ms * (100 - gpu_throttle) / gpu_throttle;
+            long long slept = 0;
+            while (slept < sleep_ms && running) {
+                long long chunk = sleep_ms - slept;
+                if (chunk > 100) chunk = 100;
+                usleep((unsigned int)(chunk * 1000));
+                slept += chunk;
+                /* No job-changed check here - trial outer loop handles it */
+                if (dagtech_now_ms() >= trial_end) break;
+            }
+        }
+
+        /* If candidate found, CPU re-verify before submitting (same as main loop) */
+        if (output_result[1] > 0 && output_result[0] != 0xFFFFFFFFu) {
+            uint32_t cand_nonce = output_result[0];
+            uint8_t verify_hdr[80];
+            memcpy(verify_hdr, header80, 80);
+            verify_hdr[76] = cand_nonce & 0xff;
+            verify_hdr[77] = (cand_nonce >> 8) & 0xff;
+            verify_hdr[78] = (cand_nonce >> 16) & 0xff;
+            verify_hdr[79] = (cand_nonce >> 24) & 0xff;
+            uint8_t hash[32];
+            dagtech_hash(verify_hdr, hash, V_cpu);
+            uint64_t hash_top64 =
+                ((uint64_t)hash[31] << 56) | ((uint64_t)hash[30] << 48) |
+                ((uint64_t)hash[29] << 40) | ((uint64_t)hash[28] << 32) |
+                ((uint64_t)hash[27] << 24) | ((uint64_t)hash[26] << 16) |
+                ((uint64_t)hash[25] <<  8) |  (uint64_t)hash[24];
+            double threshold_d = (double)0x0000FFFF00000000ULL / dagtech_effective_diff(j.difficulty);
+            uint64_t threshold64 = (threshold_d >= 18446744073709551615.0) ?
+                                    0xFFFFFFFFFFFFFFFFULL : (uint64_t)threshold_d;
+            if (hash_top64 <= threshold64) {
+                DagTechJob jcur;
+                pthread_mutex_lock(&job_mtx);
+                jcur = current_job;
+                pthread_mutex_unlock(&job_mtx);
+                if (jcur.seq == job_seq_local && jcur.valid) {
+                    dagtech_submit_share_ext(&jcur, cand_nonce);
+                }
+            }
+        }
+
+        nonce_base += nonce_stride;
+        if (nonce_base < 0x80000000u)
+            nonce_base = 0x80000000u + (uint32_t)gpu_idx * (uint32_t)ctx->global_size;
+        /* ====== END AUTOTUNE TRIAL DISPATCH ====== */
+    }
+
+    if (header_buf) clReleaseMemObject(header_buf);
+    free(V_cpu);
+
+    /* Settle: wait for in-flight pool replies to update accepted/rejected counters */
+    usleep(750000);
+
+    /* Snapshot stats after, compute deltas */
+    pthread_mutex_lock(&gpu_stats_mtx);
+    uint64_t hashes_after = gpu_hashes_session;
+    pthread_mutex_unlock(&gpu_stats_mtx);
+    pthread_mutex_lock(&stats_mtx);
+    uint64_t sub_after   = gpu_submitted;
+    uint64_t acc_after   = gpu_accepted;
+    uint64_t rej_after   = gpu_rejected;
+    uint64_t stale_after = gpu_stale;
+    pthread_mutex_unlock(&stats_mtx);
+
+    t.hashes    = hashes_after - hashes_before;
+    t.submitted = sub_after - sub_before;
+    t.accepted  = acc_after - acc_before;
+    t.rejected  = rej_after - rej_before;
+    t.stale     = stale_after - stale_before;
+    t.elapsed_s = (double)(dagtech_now_ms() - trial_t0) / 1000.0;
+
+    /* Validity gate: must run for at least 50% of intended duration */
+    if (t.elapsed_s < (double)seconds * 0.5) {
+        strncpy(t.reason, "too_short", sizeof(t.reason) - 1);
+        return t;
+    }
+
+    t.hashrate_hps = t.elapsed_s > 0 ? (double)t.hashes / t.elapsed_s : 0.0;
+    t.avg_batch_ms = batch_count > 0 ? ((double)batch_ms_total / (double)batch_count) : 0.0;
+    t.max_batch_ms = (double)max_batch_ms;
+
+    /* Scoring (reference miner's formula, simplified - we map lowdiff/error
+     * to our rejected counter since the pool doesn't distinguish these for us). */
+    double accepted_factor = t.submitted > 0
+        ? ((double)t.accepted / (double)t.submitted)
+        : 0.85;
+    if (accepted_factor < 0.15) accepted_factor = 0.15;
+    double base       = t.hashrate_hps * accepted_factor;
+    double stale_rate = (t.submitted + t.stale) > 0 ? (double)t.stale / (double)(t.submitted + t.stale) : 0.0;
+    double rej_rate   = t.submitted > 0 ? (double)t.rejected / (double)t.submitted : 0.0;
+    if (stale_rate > 0.75) stale_rate = 0.75;
+    if (rej_rate   > 0.75) rej_rate   = 0.75;
+    double stale_pen   = base * stale_rate;
+    double lowdiff_pen = base * rej_rate;
+    double useful = base - stale_pen - lowdiff_pen;
+    if (useful < 0) useful = 0;
+    double latency_pen = 0.0;
+    if (t.avg_batch_ms > (double)gpu_target_batch_ms && t.avg_batch_ms > 0.0) {
+        double rate = 1.0 - ((double)gpu_target_batch_ms / t.avg_batch_ms);
+        if (rate > 0.75) rate = 0.75;
+        if (rate < 0.0)  rate = 0.0;
+        latency_pen = useful * rate;
+    }
+    double final = useful - latency_pen;
+    if (final < 0) final = 0;
+
+    t.accepted_factor   = accepted_factor;
+    t.base_score        = base;
+    t.stale_penalty     = stale_pen;
+    t.lowdiff_penalty   = lowdiff_pen;
+    t.latency_penalty   = latency_pen;
+    t.final_score       = final;
+    t.valid             = 1;
+    strncpy(t.reason, "ok", sizeof(t.reason) - 1);
+    return t;
+}
+
+/* Top-level autotune: load cache or sweep all candidates, apply winner.
+ * Returns 0 on success (ctx->global_size and ctx->kernel_mode now reflect winner;
+ * V_buf and X_buf allocated for the winner). Returns -1 on hard failure (no valid
+ * candidate AND can't allocate fallback). */
+static int autotune_run(GpuCtx *ctx, int gpu_idx) {
+    if (!gpu_autotune) return 0;
+
+    char key[1280];
+    at_compute_cache_key(ctx, key, sizeof(key));
+
+    /* Cache hit path */
+    if (!gpu_autotune_force) {
+        int cached_bs = 0, cached_mode = -1;
+        if (autotune_load_cache(gpu_autotune_cache, key, &cached_bs, &cached_mode)) {
+            printf("[Autotune] GPU %d: cache hit (batchsize=%d, mode=%s).\n",
+                   gpu_idx, cached_bs, at_mode_int_to_name(cached_mode));
+            if (gpu_realloc_buffers(ctx, (size_t)cached_bs, cached_mode) == 0) {
+                printf("[Autotune] GPU %d: applied cached selection.\n", gpu_idx);
+                return 0;
+            }
+            fprintf(stderr, "[Autotune] GPU %d: cache hit but realloc failed; retuning.\n", gpu_idx);
+        } else {
+            printf("[Autotune] GPU %d: no valid cache; running trials.\n", gpu_idx);
+        }
+    } else {
+        printf("[Autotune] GPU %d: AUTOTUNE_FORCE=1; running trials.\n", gpu_idx);
+    }
+
+    /* Parse candidate lists */
+    int batches[AUTOTUNE_MAX_BATCHES];
+    int modes[AUTOTUNE_MAX_MODES];
+    int n_batches = at_parse_int_list(gpu_autotune_batches, batches, AUTOTUNE_MAX_BATCHES);
+    int n_modes   = at_parse_mode_list(gpu_autotune_modes, modes, AUTOTUNE_MAX_MODES);
+    if (n_batches == 0 || n_modes == 0) {
+        fprintf(stderr, "[Autotune] GPU %d: empty candidate list; skipping (batches=%d modes=%d).\n",
+                gpu_idx, n_batches, n_modes);
+        return -1;
+    }
+
+    int total = n_batches * n_modes;
+    printf("[Autotune] GPU %d: %d batches x %d modes = %d trials at %ds each (~%dm total).\n",
+           gpu_idx, n_batches, n_modes, total,
+           gpu_autotune_trial_seconds, (total * gpu_autotune_trial_seconds + 30) / 60);
+
+    AutotuneTrial trials[AUTOTUNE_MAX_TRIALS];
+    int n_trials = 0;
+    int idx = 1;
+    /* Iterate modes outer, batches inner: groups same-mode trials together
+     * (avoids unnecessary kernel-mode switches and X_buf re-alloc churn) */
+    for (int i = 0; i < n_modes; i++) {
+        for (int b = 0; b < n_batches; b++) {
+            if (!running) break;
+            printf("[Autotune] GPU %d: trial %d/%d batchsize=%d mode=%s ...\n",
+                   gpu_idx, idx, total, batches[b], at_mode_int_to_name(modes[i]));
+            AutotuneTrial t = autotune_run_trial(ctx, batches[b], modes[i],
+                                                  gpu_autotune_trial_seconds, gpu_idx);
+            if (t.valid) {
+                printf("[Autotune] GPU %d: trial %d done: hps=%.0f sub=%llu acc=%llu rej=%llu stale=%llu avg_ms=%.1f score=%.0f\n",
+                       gpu_idx, idx,
+                       t.hashrate_hps,
+                       (unsigned long long)t.submitted, (unsigned long long)t.accepted,
+                       (unsigned long long)t.rejected,  (unsigned long long)t.stale,
+                       t.avg_batch_ms, t.final_score);
+            } else {
+                printf("[Autotune] GPU %d: trial %d INVALID (reason=%s, elapsed=%.1fs)\n",
+                       gpu_idx, idx, t.reason, t.elapsed_s);
+            }
+            trials[n_trials++] = t;
+            idx++;
+        }
+    }
+
+    /* Pick winner */
+    int best = -1, valid_count = 0;
+    double best_score = -1.0;
+    for (int i = 0; i < n_trials; i++) {
+        if (!trials[i].valid) continue;
+        valid_count++;
+        if (trials[i].final_score > best_score) {
+            best_score = trials[i].final_score;
+            best = i;
+        }
+    }
+
+    if (best < 0) {
+        fprintf(stderr, "[Autotune] GPU %d: NO valid trials; falling back to original config.\n", gpu_idx);
+        size_t desired = gpu_intensity_to_global_size(ctx->intensity);
+        size_t fitted  = gpu_fit_global_size(ctx->device, desired, gpu_idx);
+        int fallback_mode = ctx->kernel_mode;  /* whatever it was before autotune started */
+        if (gpu_realloc_buffers(ctx, fitted, fallback_mode) != 0) {
+            fprintf(stderr, "[Autotune] GPU %d: fallback realloc also failed.\n", gpu_idx);
+            return -1;
+        }
+        return 0;
+    }
+
+    AutotuneTrial *w = &trials[best];
+    printf("[Autotune] GPU %d: WINNER batchsize=%d mode=%s score=%.0f (out of %d valid trials)\n",
+           gpu_idx, w->actual_batchsize, at_mode_int_to_name(w->mode), w->final_score, valid_count);
+
+    if (gpu_realloc_buffers(ctx, (size_t)w->actual_batchsize, w->mode) != 0) {
+        fprintf(stderr, "[Autotune] GPU %d: applying winner failed (realloc).\n", gpu_idx);
+        return -1;
+    }
+    autotune_save_cache(gpu_autotune_cache, key, w, valid_count);
+    printf("[Autotune] GPU %d: cache saved to %s\n", gpu_idx, gpu_autotune_cache);
+    return 0;
+}
+
 /* GPU mining thread: covers a non-overlapping partition of 0x80000000-0xFFFFFFFF.
  * GPU i starts at 0x80000000 + i*global_size and strides by N*global_size,
  * ensuring N parallel GPUs tile the full range without overlap. */
@@ -837,6 +1516,35 @@ static void *dagtech_gpu_thread(void *arg) {
     if (!ctx->ready) {
         fprintf(stderr, "[DagTech GPU] GPU %d not ready, thread exiting.\n", gpu_idx);
         return NULL;
+    }
+
+    /* #42 autotune: runs once at GPU-thread startup if AUTOTUNE=1. Waits for
+     * a valid job (trials mine real shares against the live pool), then sweeps
+     * candidates and applies the winner. On cache hit it's near-instant. On
+     * miss the user sees ~N_candidates * AUTOTUNE_TRIAL_SECONDS of trials in
+     * the log before normal mining begins. The autotune_run() leaves
+     * ctx->global_size and ctx->kernel_mode set to the winner, with V_buf and
+     * X_buf already reallocated to match. */
+    if (gpu_autotune) {
+        int waits = 0;
+        for (;;) {
+            if (!running) return NULL;
+            pthread_mutex_lock(&job_mtx);
+            int have_job = (current_job.valid != 0);
+            pthread_mutex_unlock(&job_mtx);
+            if (have_job) break;
+            if (waits == 0)
+                printf("[Autotune] GPU %d: waiting for first valid pool job before tuning...\n", gpu_idx);
+            usleep(200000);
+            if (++waits > 5 * 60) {  /* 60s timeout */
+                fprintf(stderr, "[Autotune] GPU %d: no job after 60s; skipping autotune.\n", gpu_idx);
+                gpu_autotune = 0;
+                break;
+            }
+        }
+        if (gpu_autotune) {
+            autotune_run(ctx, gpu_idx);
+        }
     }
 
     uint32_t nonce_base   = 0x80000000u + (uint32_t)gpu_idx * (uint32_t)ctx->global_size;
@@ -932,23 +1640,39 @@ static void *dagtech_gpu_thread(void *arg) {
             uint64_t gpu_t0 = dagtech_now_ms();
             cl_event ev = NULL;
             cl_int err;
-            if (ctx->kernel_mode == 1) {
-                /* Split-kernel mode (#40 increment 2).
+            if (ctx->kernel_mode >= 1) {
+                /* Split-kernel mode (#40 increment 2) or coop mode (#40 inc 3).
+                 * pre and post are identical between modes; only the middle
+                 * romix kernel and its launch shape differ.
                  * Queue is in-order, so intermediate enqueues don't need events;
                  * only the final dagtech_post produces the event we wait on -
-                 * which can't complete until pre and romix have finished. The
-                 * <2ms "implausibly fast" guard below measures from gpu_t0 to
-                 * the event completion, so it still catches the all-no-op case. */
+                 * which can't complete until pre and (romix|romix_coop) have
+                 * finished. The <2ms "implausibly fast" guard below measures
+                 * from gpu_t0 to event completion, still catches no-op cases. */
                 clSetKernelArg(ctx->kernel_pre, 0, sizeof(cl_mem),  &header_buf);
                 clSetKernelArg(ctx->kernel_pre, 1, sizeof(cl_mem),  &ctx->X_buf);
                 clSetKernelArg(ctx->kernel_pre, 2, sizeof(cl_uint), &nonce_base);
                 err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_pre, 1, NULL,
                                              &ctx->global_size, NULL, 0, NULL, NULL);
                 if (err == CL_SUCCESS) {
-                    clSetKernelArg(ctx->kernel_romix, 0, sizeof(cl_mem), &ctx->X_buf);
-                    clSetKernelArg(ctx->kernel_romix, 1, sizeof(cl_mem), &ctx->V_buf);
-                    err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_romix, 1, NULL,
-                                                 &ctx->global_size, NULL, 0, NULL, NULL);
+                    if (ctx->kernel_mode == 2) {
+                        /* Coop romix: 4 threads/hash. global_size_romix = 4 *
+                         * hashes, lws fixed at coop_local_size (64), __local
+                         * L sized by host (coop_local_bytes). */
+                        size_t coop_gws = ctx->global_size * 4;
+                        clSetKernelArg(ctx->kernel_romix_coop, 0, sizeof(cl_mem), &ctx->X_buf);
+                        clSetKernelArg(ctx->kernel_romix_coop, 1, sizeof(cl_mem), &ctx->V_buf);
+                        clSetKernelArg(ctx->kernel_romix_coop, 2, ctx->coop_local_bytes, NULL);
+                        err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_romix_coop, 1, NULL,
+                                                     &coop_gws, &ctx->coop_local_size,
+                                                     0, NULL, NULL);
+                    } else {
+                        /* Split romix: 1 thread/hash, driver picks lws */
+                        clSetKernelArg(ctx->kernel_romix, 0, sizeof(cl_mem), &ctx->X_buf);
+                        clSetKernelArg(ctx->kernel_romix, 1, sizeof(cl_mem), &ctx->V_buf);
+                        err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_romix, 1, NULL,
+                                                     &ctx->global_size, NULL, 0, NULL, NULL);
+                    }
                 }
                 if (err == CL_SUCCESS) {
                     clSetKernelArg(ctx->kernel_post, 0, sizeof(cl_mem),  &ctx->X_buf);
@@ -1860,6 +2584,31 @@ static void dagtech_load_config(const char *path) {
                 gpu_intensity_count = 0;
             }
         }
+        /* #42 autotune knobs */
+        else if (strcmp(key, "AUTOTUNE")               == 0) gpu_autotune = atoi(val) ? 1 : 0;
+        else if (strcmp(key, "AUTOTUNE_FORCE")         == 0) gpu_autotune_force = atoi(val) ? 1 : 0;
+        else if (strcmp(key, "AUTOTUNE_TRIAL_SECONDS") == 0) {
+            gpu_autotune_trial_seconds = atoi(val);
+            if (gpu_autotune_trial_seconds < 5)   gpu_autotune_trial_seconds = 5;
+            if (gpu_autotune_trial_seconds > 600) gpu_autotune_trial_seconds = 600;
+        }
+        else if (strcmp(key, "TARGET_BATCH_MS")        == 0) {
+            gpu_target_batch_ms = atoi(val);
+            if (gpu_target_batch_ms < 100)  gpu_target_batch_ms = 100;
+            if (gpu_target_batch_ms > 5000) gpu_target_batch_ms = 5000;
+        }
+        else if (strcmp(key, "AUTOTUNE_BATCHES")       == 0) {
+            strncpy(gpu_autotune_batches, val, sizeof(gpu_autotune_batches) - 1);
+            gpu_autotune_batches[sizeof(gpu_autotune_batches) - 1] = '\0';
+        }
+        else if (strcmp(key, "AUTOTUNE_KERNEL_MODES")  == 0) {
+            strncpy(gpu_autotune_modes, val, sizeof(gpu_autotune_modes) - 1);
+            gpu_autotune_modes[sizeof(gpu_autotune_modes) - 1] = '\0';
+        }
+        else if (strcmp(key, "AUTOTUNE_CACHE")         == 0) {
+            strncpy(gpu_autotune_cache, val, sizeof(gpu_autotune_cache) - 1);
+            gpu_autotune_cache[sizeof(gpu_autotune_cache) - 1] = '\0';
+        }
         else if (strcmp(key, "GPU_PLATFORM") == 0) gpu_platform  = atoi(val);
         else if (strcmp(key, "GPU_DEVICE")   == 0) {
             if (strcmp(val, "all") == 0) {
@@ -2033,6 +2782,35 @@ int main(int argc, char **argv) {
 
     /* ---- Load config file (CLI args below will override) ---- */
     dagtech_load_config(config_path);
+
+    /* ---- #42 env-var overrides for autotune knobs (env wins over config.env)
+       Lets ad-hoc tuning happen without editing config.env, mirroring the
+       GPU_KERNEL_MODE env-var override pattern. ---- */
+    {
+        const char *e;
+        if ((e = getenv("AUTOTUNE"))               != NULL) gpu_autotune = atoi(e) ? 1 : 0;
+        if ((e = getenv("AUTOTUNE_FORCE"))         != NULL) gpu_autotune_force = atoi(e) ? 1 : 0;
+        if ((e = getenv("AUTOTUNE_TRIAL_SECONDS")) != NULL) {
+            int v = atoi(e);
+            if (v >= 5 && v <= 600) gpu_autotune_trial_seconds = v;
+        }
+        if ((e = getenv("TARGET_BATCH_MS"))        != NULL) {
+            int v = atoi(e);
+            if (v >= 100 && v <= 5000) gpu_target_batch_ms = v;
+        }
+        if ((e = getenv("AUTOTUNE_BATCHES"))       != NULL) {
+            strncpy(gpu_autotune_batches, e, sizeof(gpu_autotune_batches) - 1);
+            gpu_autotune_batches[sizeof(gpu_autotune_batches) - 1] = '\0';
+        }
+        if ((e = getenv("AUTOTUNE_KERNEL_MODES"))  != NULL) {
+            strncpy(gpu_autotune_modes, e, sizeof(gpu_autotune_modes) - 1);
+            gpu_autotune_modes[sizeof(gpu_autotune_modes) - 1] = '\0';
+        }
+        if ((e = getenv("AUTOTUNE_CACHE"))         != NULL) {
+            strncpy(gpu_autotune_cache, e, sizeof(gpu_autotune_cache) - 1);
+            gpu_autotune_cache[sizeof(gpu_autotune_cache) - 1] = '\0';
+        }
+    }
 
     /* ---- Pass 2: full argument parsing ---- */
     int do_save_config = 0;

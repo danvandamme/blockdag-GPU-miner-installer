@@ -327,6 +327,95 @@ static void xor_salsa8(__private uint B[16], __private const uint Bx[16])
 }
 
 /* =========================================================================
+ * xor_salsa8_coop — Salsa20/8 parallelized across 4 cooperating threads.
+ *
+ * Salsa20 uses DIAGONAL column ownership (column c starts at row c, then
+ * wraps). So thread t owns the diagonal column t:
+ *   Thread 0: positions (0, 4, 8, 12)         = (x[0],  x[4],  x[8],  x[12])
+ *   Thread 1: positions (5, 9, 13, 1)         = (x[5],  x[9],  x[13], x[1])
+ *   Thread 2: positions (10, 14, 2, 6)        = (x[10], x[14], x[2],  x[6])
+ *   Thread 3: positions (15, 3, 7, 11)        = (x[15], x[3],  x[7],  x[11])
+ *
+ * With this rotation, the column-round formula is IDENTICAL for every
+ * thread (r1 ^= rot(r0+r3,7); r2 ^= rot(r1+r0,9); ...). After the column
+ * round we transpose to DIAGONAL row ownership:
+ *   Thread 0: (x[0],  x[1],  x[2],  x[3])  — row 0, regular order
+ *   Thread 1: (x[5],  x[6],  x[7],  x[4])  — row 1, cycled by +1
+ *   Thread 2: (x[10], x[11], x[8],  x[9])  — row 2, cycled by +2
+ *   Thread 3: (x[15], x[12], x[13], x[14]) — row 3, cycled by +3
+ * The row-round formula is the SAME 4-op sequence on these.
+ *
+ * The diagonal-col → diagonal-row transpose: thread t writes lane k to
+ * Lh[t*4 + k]; the destination thread t reads new lane k from Lh[t_src*4
+ * + k_src] where t_src = (t + k) & 3, k_src = (-k) & 3 = (4 - k) & 3.
+ * (Derivation: row_pos(t,k) = x_{4t + (k+t)%4}; this value sits at
+ * col_pos(t_src, k_src) where t_src = (k+t)%4 and k_src = (t - t_src)%4.)
+ *
+ * The row → col transpose uses the same formula by symmetry.
+ *
+ * Algorithm:
+ *   1. B ^= Bx (in place); save result as rounds-input x0..x3.
+ *   2. 4 iterations of (column round, transpose, row round, transpose-back).
+ *   3. B += final x0..x3 (still in diagonal-column ownership).
+ *
+ * Returns with B in diagonal-column ownership. Lh is left dirty.
+ * ========================================================================= */
+static void xor_salsa8_coop(__private uint B[4], __private const uint Bx[4],
+                            __local uint *Lh, uint t)
+{
+    /* B ^= Bx (in place); capture pre-rounds value for final add */
+    uint x0 = (B[0] ^= Bx[0]);
+    uint x1 = (B[1] ^= Bx[1]);
+    uint x2 = (B[2] ^= Bx[2]);
+    uint x3 = (B[3] ^= Bx[3]);
+
+    /* 4 iterations × (col-round + row-round) = 8 rounds total */
+    for (int i = 0; i < 4; i++) {
+        /* Column round — each thread on its own diagonal column, no comms */
+        x1 ^= rotate(x0 + x3,  7u);
+        x2 ^= rotate(x1 + x0,  9u);
+        x3 ^= rotate(x2 + x1, 13u);
+        x0 ^= rotate(x3 + x2, 18u);
+
+        /* Transpose: diagonal-column → diagonal-row */
+        Lh[t*4 + 0] = x0;
+        Lh[t*4 + 1] = x1;
+        Lh[t*4 + 2] = x2;
+        Lh[t*4 + 3] = x3;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        x0 = Lh[((t + 0u) & 3u) * 4u + ((4u - 0u) & 3u)];  /* = Lh[t*4 + 0]      */
+        x1 = Lh[((t + 1u) & 3u) * 4u + ((4u - 1u) & 3u)];  /* = Lh[((t+1)&3)*4+3] */
+        x2 = Lh[((t + 2u) & 3u) * 4u + ((4u - 2u) & 3u)];  /* = Lh[((t+2)&3)*4+2] */
+        x3 = Lh[((t + 3u) & 3u) * 4u + ((4u - 3u) & 3u)];  /* = Lh[((t+3)&3)*4+1] */
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        /* Row round — same 4-op formula on diagonal-row ownership */
+        x1 ^= rotate(x0 + x3,  7u);
+        x2 ^= rotate(x1 + x0,  9u);
+        x3 ^= rotate(x2 + x1, 13u);
+        x0 ^= rotate(x3 + x2, 18u);
+
+        /* Transpose: diagonal-row → diagonal-column (same formula by symmetry) */
+        Lh[t*4 + 0] = x0;
+        Lh[t*4 + 1] = x1;
+        Lh[t*4 + 2] = x2;
+        Lh[t*4 + 3] = x3;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        x0 = Lh[((t + 0u) & 3u) * 4u + ((4u - 0u) & 3u)];
+        x1 = Lh[((t + 1u) & 3u) * 4u + ((4u - 1u) & 3u)];
+        x2 = Lh[((t + 2u) & 3u) * 4u + ((4u - 2u) & 3u)];
+        x3 = Lh[((t + 3u) & 3u) * 4u + ((4u - 3u) & 3u)];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    /* B += final-rounds x (still in diagonal-column ownership) */
+    B[0] += x0;
+    B[1] += x1;
+    B[2] += x2;
+    B[3] += x3;
+}
+
+/* =========================================================================
  * scrypt_romix — port of dagtech_scrypt_romix (N=1024)
  *
  * V_slice is the work-item's own 1024*32 uint slice of the global V buffer.
@@ -611,5 +700,155 @@ __kernel void dagtech_post(__global uint *X_buf,
     if (hash[7] <= target) {
         atomic_min(&output[0], nonce);
         atomic_inc(&output[1]);
+    }
+}
+
+/* =========================================================================
+ * GPU-2026.0607.5 (#40 increment 3): dagtech_romix_coop
+ *
+ * Cooperative-thread ROMix kernel. Replaces dagtech_romix when
+ * kernel_mode == 2 (coop). dagtech_pre and dagtech_post are unchanged.
+ *
+ * Launch shape: 4 work-items per hash. global_size_romix = 4 * hashes.
+ * Local-work-size MUST be a multiple of 4; recommended 64 (= 16 hashes per
+ * work-group, all 4 threads of any hash live in the same NVIDIA warp / AMD
+ * wavefront, so barrier(CLK_LOCAL_MEM_FENCE) is cheap intra-warp sync).
+ *
+ * Local memory (passed as kernel arg with host-supplied size):
+ *   - 32 uints per hash. Layout per hash:
+ *       L[ 0..15]  used as transpose scratch by xor_salsa8_coop
+ *       L[16..47]  used for: X rearrangement on entry/exit (32 uints),
+ *                  AND j broadcast in Mix phase (1 uint, slot [16])
+ *     (Disjoint in time: rearrangement happens before/after the loops;
+ *     j broadcast happens between salsas. Salsa transposes use [0..15].)
+ *   Host computes:  local_bytes = (lws / 4) * 32 * sizeof(cl_uint).
+ *
+ * Per-hash V layout in this kernel (only used internally — pre/post never
+ * touch V). Each row of 32 uints holds 4 diagonal-column ownership chunks
+ * of B then 4 of Bx, so 4 cooperating threads write/read 4 adjacent
+ * 16-byte chunks (one 128-byte coalesced transaction per chunk):
+ *     V_slice[i*32 +  0.. 3]  thread 0's diag-Bcol  = (B[0],  B[4],  B[8],  B[12])
+ *     V_slice[i*32 +  4.. 7]  thread 1's diag-Bcol  = (B[5],  B[9],  B[13], B[1])
+ *     V_slice[i*32 +  8..11]  thread 2's diag-Bcol  = (B[10], B[14], B[2],  B[6])
+ *     V_slice[i*32 + 12..15]  thread 3's diag-Bcol  = (B[15], B[3],  B[7],  B[11])
+ *     V_slice[i*32 + 16..19]  thread 0's diag-Bxcol = (Bx[0],  Bx[4],  Bx[8],  Bx[12])
+ *     V_slice[i*32 + 20..23]  thread 1's diag-Bxcol = (Bx[5],  Bx[9],  Bx[13], Bx[1])
+ *     V_slice[i*32 + 24..27]  thread 2's diag-Bxcol = (Bx[10], Bx[14], Bx[2],  Bx[6])
+ *     V_slice[i*32 + 28..31]  thread 3's diag-Bxcol = (Bx[15], Bx[3],  Bx[7],  Bx[11])
+ * V's internal layout doesn't match X's flat layout but that's fine — V is
+ * private to this kernel; the rearrange-on-entry and rearrange-on-exit map
+ * to/from X's flat X[0..31] for the pre/post handoff.
+ * ========================================================================= */
+__kernel void dagtech_romix_coop(__global uint *X_buf,
+                                 __global uint *V,
+                                 __local  uint *L)
+{
+    uint gid       = get_global_id(0);
+    uint lid       = get_local_id(0);
+    uint t         = gid & 3u;            /* thread within hash (0..3) */
+    uint hash_gid  = gid >> 2;            /* hash index globally */
+    uint hash_lid  = lid >> 2;            /* hash index within work-group */
+
+    /* This hash's 32-uint slice of local memory */
+    __local uint *Lh = L + hash_lid * 32;
+    __local uint *Lt = Lh;             /* transpose scratch (16 uints) */
+    __local uint *Lx = Lh + 16;        /* X-rearrangement scratch (32 uints)
+                                          AND j broadcast (slot [0] of Lx) */
+
+    __global uint *V_slice = V + (size_t)hash_gid * (size_t)(1024 * 32);
+    __global uint *X_ptr   = X_buf + (size_t)hash_gid * 32;
+
+    /* --- Load X[t*8 .. t*8+7] (regular contiguous layout from dagtech_pre) --- */
+    uint X8[8];
+    {
+        __global uint4 *Xp = (__global uint4 *)(X_ptr + t * 8);
+        uint4 v;
+        v = Xp[0]; X8[0]=v.x; X8[1]=v.y; X8[2]=v.z; X8[3]=v.w;
+        v = Xp[1]; X8[4]=v.x; X8[5]=v.y; X8[6]=v.z; X8[7]=v.w;
+    }
+
+    /* --- Rearrange into DIAGONAL-column ownership via Lx (32 uints/hash) ---
+       Each thread t writes its 8 contiguous X[t*8..t*8+7] into Lx[t*8..t*8+7].
+       After barrier, each thread reads its 8 diag-column-owned values:
+         Bcol[k]  = Lx[ 0 + t + 4*((k+t) & 3) ]    for k=0..3
+         Bxcol[k] = Lx[16 + t + 4*((k+t) & 3) ]    for k=0..3
+       Examples:
+         t=0: Bcol = (Lx[0],  Lx[4],  Lx[8],  Lx[12])  = (X[0],  X[4],  X[8],  X[12])
+         t=1: Bcol = (Lx[5],  Lx[9],  Lx[13], Lx[1])   = (X[5],  X[9],  X[13], X[1])
+         t=2: Bcol = (Lx[10], Lx[14], Lx[2],  Lx[6])
+         t=3: Bcol = (Lx[15], Lx[3],  Lx[7],  Lx[11])
+    */
+    for (int k = 0; k < 8; k++) Lx[t*8 + k] = X8[k];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    uint Bcol[4], Bxcol[4];
+    Bcol[0]  = Lx[ 0u + t + 4u * ((0u + t) & 3u) ];
+    Bcol[1]  = Lx[ 0u + t + 4u * ((1u + t) & 3u) ];
+    Bcol[2]  = Lx[ 0u + t + 4u * ((2u + t) & 3u) ];
+    Bcol[3]  = Lx[ 0u + t + 4u * ((3u + t) & 3u) ];
+    Bxcol[0] = Lx[16u + t + 4u * ((0u + t) & 3u) ];
+    Bxcol[1] = Lx[16u + t + 4u * ((1u + t) & 3u) ];
+    Bxcol[2] = Lx[16u + t + 4u * ((2u + t) & 3u) ];
+    Bxcol[3] = Lx[16u + t + 4u * ((3u + t) & 3u) ];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    /* --- Fill phase: 1024 iterations of (write V row) + (2 coop salsas) --- */
+    for (int i = 0; i < 1024; i++) {
+        /* Write this thread's 4-uint B chunk and 4-uint Bx chunk to V row i.
+           Four threads' uint4 writes = one 128-byte transaction per chunk. */
+        __global uint4 *Vp_b  = (__global uint4 *)(V_slice + i*32 +  0 + t*4);
+        __global uint4 *Vp_bx = (__global uint4 *)(V_slice + i*32 + 16 + t*4);
+        Vp_b [0] = (uint4)(Bcol[0],  Bcol[1],  Bcol[2],  Bcol[3]);
+        Vp_bx[0] = (uint4)(Bxcol[0], Bxcol[1], Bxcol[2], Bxcol[3]);
+
+        /* xor_salsa8(B, Bx)  →  B becomes (B^Bx) + salsa(B^Bx)  */
+        xor_salsa8_coop(Bcol, Bxcol, Lt, t);
+        /* xor_salsa8(Bx, B)  →  Bx becomes (Bx^new_B) + salsa(Bx^new_B)  */
+        xor_salsa8_coop(Bxcol, Bcol, Lt, t);
+    }
+
+    /* --- Mix phase: 1024 iterations of (broadcast j) + (XOR V row) + (2 coop salsas) --- */
+    for (int i = 0; i < 1024; i++) {
+        /* j = X[16] & 1023u. X[16] = Bx[0]. In column ownership, Bx[0] is the
+           lane-0 value of thread 0's Bxcol. Broadcast via Lx[0]. */
+        if (t == 0) Lx[0] = Bxcol[0];
+        barrier(CLK_LOCAL_MEM_FENCE);
+        int j = (int)(Lx[0] & 1023u);
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        /* XOR V[j] into B and Bx (same layout as Fill writes) */
+        __global uint4 *Vp_b  = (__global uint4 *)(V_slice + j*32 +  0 + t*4);
+        __global uint4 *Vp_bx = (__global uint4 *)(V_slice + j*32 + 16 + t*4);
+        uint4 vb  = Vp_b [0];
+        uint4 vbx = Vp_bx[0];
+        Bcol[0]  ^= vb.x;  Bcol[1]  ^= vb.y;  Bcol[2]  ^= vb.z;  Bcol[3]  ^= vb.w;
+        Bxcol[0] ^= vbx.x; Bxcol[1] ^= vbx.y; Bxcol[2] ^= vbx.z; Bxcol[3] ^= vbx.w;
+
+        xor_salsa8_coop(Bcol, Bxcol, Lt, t);
+        xor_salsa8_coop(Bxcol, Bcol, Lt, t);
+    }
+
+    /* --- Inverse rearrange: DIAGONAL-column ownership back to flat X[0..31] ---
+       Each thread t writes its 4+4 diag-column values back to the positions
+       they came from on entry, then reads its contiguous 8-uint chunk.
+       Symmetric to the entry rearrangement. */
+    Lx[ 0u + t + 4u * ((0u + t) & 3u) ] = Bcol[0];
+    Lx[ 0u + t + 4u * ((1u + t) & 3u) ] = Bcol[1];
+    Lx[ 0u + t + 4u * ((2u + t) & 3u) ] = Bcol[2];
+    Lx[ 0u + t + 4u * ((3u + t) & 3u) ] = Bcol[3];
+    Lx[16u + t + 4u * ((0u + t) & 3u) ] = Bxcol[0];
+    Lx[16u + t + 4u * ((1u + t) & 3u) ] = Bxcol[1];
+    Lx[16u + t + 4u * ((2u + t) & 3u) ] = Bxcol[2];
+    Lx[16u + t + 4u * ((3u + t) & 3u) ] = Bxcol[3];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int k = 0; k < 8; k++) X8[k] = Lx[t*8 + k];
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    /* --- Store X back to X_buf (regular contiguous layout for dagtech_post) --- */
+    {
+        __global uint4 *Xp = (__global uint4 *)(X_ptr + t * 8);
+        Xp[0] = (uint4)(X8[0], X8[1], X8[2], X8[3]);
+        Xp[1] = (uint4)(X8[4], X8[5], X8[6], X8[7]);
     }
 }

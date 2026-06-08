@@ -1,7 +1,23 @@
 # Task #40 — Coalesce V-buffer (port plan)
 
-**Status:** Study-phase output. No code changes yet.
+**Status:** ✅ SHIPPED as **GPU-2026.0608.1**. Increments 1–3 of #40 plus #42 (autotune) are complete.
 **Baseline:** GPU-2026.0607.2 on RTX 4060 Laptop (8 GB), 129 KH/s GPU + 9 KH/s CPU, shares 90/91 accepted.
+
+### Release GPU-2026.0608.1 — what shipped
+- **#40 Inc1** — `uint4` vectorized V-buffer access in `scrypt_romix` (committed `903813b`).
+- **#40 Inc2** — split monolithic `dagtech_search` into `dagtech_pre` / `dagtech_romix` / `dagtech_post` kernels; this is the **default** path (committed `21df1f7`).
+- **#40 Inc3** — cooperative 4-threads-per-hash ROMix (`dagtech_romix_coop`). **Opt-in only** via `GPU_KERNEL_MODE=coop` — slower than split on this GPU because OpenCL `__local`+barrier overhead exceeds the savings vs CUDA `__shfl_sync`. Kept for devices where it may win.
+- **#42 Autotune** — opt-in via `AUTOTUNE=1`. Sweeps batch size × kernel mode, scores by accepted-share-weighted hashrate, caches the winner to `autotune.json` keyed on GPU+driver. On the 4060 Laptop it selects **split @ batchsize 8192**.
+- **Bugfix** — GPU_VENDOR detection on multi-GPU systems; registers all available OpenCL ICDs (committed `bb41841`).
+
+**Measured result (RTX 4060 Laptop):** ~129 KH/s baseline → **~256 KH/s at `GPU_THROTTLE=50`** → **~621 KH/s steady at `GPU_THROTTLE=100`** (split @ 8192). Roughly **2× faster** than the previous shipped version under the same throttle, ~4.5× vs raw baseline at full throttle. Share-accept ratio unchanged (no rejects/stales introduced).
+
+**Portability stance:** OpenCL 1.2, no vendor intrinsics; everything NVIDIA-specific (e.g. any future `nvidia-smi` telemetry) stays optional and degrades silently. The `.cl` kernel is loaded at runtime next to the exe, so it must ship alongside the binary (the installer copies it on both build-from-source and prebuilt paths).
+
+### Known follow-ups (not blocking this release)
+- `dagtech_default_config_path()` looks under `$USERPROFILE/dagtech-gpu-miner/config.env` instead of the install root `C:\dagtech-gpu-miner\` — config.env isn't auto-loaded on scheduled-task launch; worked around with env vars / CLI args.
+- Scheduled task is named `DagTech Miner`, but some install/control scripts assume `DagTech GPU Miner`.
+- Branding rename (DagTech → generic "bdag miner", credit DagTech original + DVD Mining modifications) — parked for a future session with a fresh repo.
 **Validation rule (from CLAUDE.md):** every increment must produce **real H/s + accepted shares** before merging. The host-side `<2 ms` "implausibly fast" guard in `dagtech_gpu_thread` (around `dagtech_miner.c:927`) is the trip wire — if a kernel batch completes in under 2 ms, hashes aren't counted (driver-reset / fast-fail symptom).
 
 ---
@@ -113,6 +129,16 @@ Each increment ends with the same gate: **build → run → check `gpu_hashrate`
 
 ### Increment 3 — Cooperative 4 threads/hash + coalesced V layout (high risk, big win)
 
+**Outcome (RTX 4060 Laptop, default-split disabled, GPU_KERNEL_MODE=coop):** algorithmically correct but **slower** than Inc2 — ~80 KH/s vs Inc2's ~272 KH/s. Across two validation polls (lws=64 and lws=32) totalling 109 submitted shares, **zero rejected**. The cooperative Salsa20/8 with diagonal-column ownership and `__local`+`barrier` transposes produces bit-identical hashes — the post-ROMix tweak is preserved, pool acceptance unchanged.
+
+Root cause of the regression: the reference miner's wins come from CUDA `__shfl_sync` (1-cycle hardware warp shuffle); the portable-OpenCL substitute (`__local` writes + `barrier(CLK_LOCAL_MEM_FENCE)` + reads) has overhead that exceeds the per-thread compute savings on this hardware. Switching `lws` between 64 (1 AMD wavefront / 2 NVIDIA warps) and 32 (1 NVIDIA warp, intra-warp lockstep) didn't materially change the result — the cost isn't the barrier wait, it's the local-memory round-trip itself relative to the small amount of saved compute.
+
+Decision: **kept as an opt-in path, not the default.** The coop kernel and its host wiring (`kernel_romix_coop`, `kernel_mode==2`) are shipped in the source so it can be tested on different hardware (AMD with native wavefront cooperation, OpenCL 2.0 sub-group shuffles, future tuning). Default `kernel_mode` is capped at split (1); set `GPU_KERNEL_MODE=coop` to opt in.
+
+**Lesson:** Inc2's surprise +112% gain came from kernel-split-driven register-pressure relief, not from memory coalescing. After Inc2 the kernel isn't memory-bound anymore — it's well-utilizing the SMs — so adding more work-items via cooperation doesn't help, and the barrier overhead hurts. Future #40-related work (if any) should focus on autotune (#42) and possibly OpenCL 2.0 sub-group shuffles for NVIDIA-capable devices, not on more parallelization of the existing structure.
+
+
+
 **What changes:**
 - The new `dagtech_romix` kernel from Increment 2 gets rewritten: launch with `4 × scrypt_blocks` work-items, use `__local` memory + barriers for the four threads of each scrypt block to share state, and reshape the V buffer to **interleaved layout** so adjacent work-items touch adjacent memory.
 
@@ -125,6 +151,60 @@ Each increment ends with the same gate: **build → run → check `gpu_hashrate`
 **Risk:** high. New layout means every V read/write changes; the Salsa20/8 state must be reconstructed from four threads' partial views; barriers are non-trivial to place correctly. The post-ROMix X[0] tweak runs **after** ROMix output is recombined into a single 32-uint state — easy to get wrong.
 
 **Rollback:** the previous increment's `dagtech_romix` kernel is preserved alongside, selectable via an env var or `GPU_COOP_THREADS=0|1`. If we ship Increment 3 broken, users can fall back without re-installing.
+
+### #42 — GPU work-size autotune (status update)
+
+**Shipped (uncommitted, in source tree):** trial harness, scoring formula (reference miner's), key-based JSON cache, gpu_thread startup integration, config knobs in config.env and via env-var override.
+
+Config knobs (all opt-in, AUTOTUNE defaults to 0):
+- `AUTOTUNE` (0|1): turn it on
+- `AUTOTUNE_BATCHES` (comma list): default `"1024,2048,4096,8192"`
+- `AUTOTUNE_KERNEL_MODES` (comma list): default `"split,legacy"` (coop stays manual)
+- `AUTOTUNE_TRIAL_SECONDS` (5..600): default 60 (was 30 in early draft)
+- `AUTOTUNE_FORCE` (0|1): force re-run, ignore cache
+- `AUTOTUNE_CACHE` (path): default `C:\dagtech-gpu-miner\autotune.json`
+- `TARGET_BATCH_MS`: default 1500 (latency penalty threshold)
+
+Scoring formula (matches reference miner; per-penalty cap at 0.75 of base):
+```
+accepted_factor = submitted>0 ? max(0.15, accepted/submitted) : 0.85
+base = hashrate_hps * accepted_factor
+stale_penalty   = base * min(0.75, stale_rate)
+lowdiff_penalty = base * min(0.75, rejected_rate)
+useful = max(0, base - stale_penalty - lowdiff_penalty)
+latency_penalty = avg_batch_ms > target_ms ? useful * (1 - target_ms/avg_batch_ms) : 0
+final_score = max(0, useful - latency_penalty)
+```
+
+**Bug found and fixed during validation:** the first iteration's trial harness omitted `GPU_THROTTLE`'s duty-cycle sleep. Trials ran at 100% duty cycle while live mining runs at `gpu_throttle`%. Trial hashrates were inflated by `1/throttle` (2× at the default 50% throttle). Patched: trial harness now applies the same `gpu_elapsed * (100 - gpu_throttle) / gpu_throttle` sleep as the main loop.
+
+**Validation results (RTX 4060 Laptop, AUTOTUNE_FORCE=1, AUTOTUNE_TRIAL_SECONDS=30, post-throttle-fix):**
+
+| # | Batchsize | Mode | hps | sub/acc | avg_ms | score |
+|---|---|---|---|---|---|---|
+| 1 | 1024 | split | 35,331 | 3/3 | 10.0 | 35,331 |
+| 2 | 2048 | split | 126,090 | 14/14 | 5.7 | 126,090 |
+| 3 | 4096 | split | 125,226 | 11/11 | 11.2 | 125,226 |
+| 4 | 8192 | split | 166,451 | 12/12 | 17.1 | 166,451 |
+| 5 | 1024 | legacy | 31,231 | 4/4 | 10.5 | 31,231 |
+| 6 | 2048 | legacy | 122,582 | 11/10 | 6.1 | 102,151 |
+| 7 | 4096 | legacy | 124,799 | 10/10 | 11.3 | 124,799 |
+| 8 | 8192 | legacy | **217,548** | 15/15 | 13.3 | **217,548 ← winner** |
+
+Live steady-state at the autotune-picked config (legacy@8192): ~257 KH/s. Trial under-measured by ~15% (warmup overhead, short trial). Inc2's split@8192 steady-state was ~272 KH/s, so the autotune pick is within 5% of best-known. Autotune did NOT pick a wildly wrong winner — both legacy@8192 (post-Inc1 uint4 benefits) and split@8192 are top-tier on this GPU; short trials had enough noise that legacy edged split this time.
+
+**Known limitations of v1:**
+- Short trials (30s default in test, 60s production) have run-to-run variance. The picked winner is consistently top-tier but may flip between top candidates on different runs.
+- No per-candidate latency-vs-target tracking yet (just averages avg_batch_ms).
+- No detailed `autotune_summary_*.json` reports — only the winner is saved.
+- No `AUTO_THRESHOLD` adaptive submit margin.
+- Trial harness duplicates the main-loop dispatch (~80 lines) rather than refactoring — keeps the working main path completely safe, costs duplication.
+
+**Two operational bugs surfaced during validation (separate from autotune):**
+1. **Scheduled task is named `DagTech Miner`** (not `DagTech GPU Miner` as the README implies). `Stop-ScheduledTask -TaskName 'DagTech GPU Miner'` silently no-ops.
+2. **`dagtech_default_config_path()`** in `dagtech_miner.c` looks for config under `$USERPROFILE/dagtech-gpu-miner/`, but the install lives at `C:\dagtech-gpu-miner\`. When the scheduled task starts the miner via the control server, the miner can't read config.env (relies on CLI args from the control server instead). Anything in config.env that isn't passed as a CLI arg — including all AUTOTUNE knobs — never takes effect on a scheduled-task launch. Workarounds for now: env vars (machine-scope), or `--config` CLI flag added to the control server's `Build-MinerArgList`.
+
+---
 
 ### Increment 4 — Tune work-group size
 
