@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0608.10"
+set "VERSION=GPU-2026.0608.11"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -501,7 +501,9 @@ set /p "GPU_THROTTLE_INPUT=  GPU throttle 5-100 (default !DEF_GPU_THROTTLE!): "
 if "!GPU_THROTTLE_INPUT!"=="" (set "GPU_THROTTLE=!DEF_GPU_THROTTLE!") else (set "GPU_THROTTLE=!GPU_THROTTLE_INPUT!")
 
 echo.
-if not defined DEF_AUTOTUNE     set "DEF_AUTOTUNE=0"
+REM Fresh installs (no existing config) default autotune ON so a new machine
+REM tunes itself on first boot. Existing installs keep whatever they had.
+if not defined DEF_AUTOTUNE     set "DEF_AUTOTUNE=1"
 if not defined DEF_AUTOTUNE_SEC set "DEF_AUTOTUNE_SEC=60"
 echo   GPU autotune sweeps batch sizes/kernel modes once at startup and caches the
 echo   fastest combo. First run adds a few minutes; instant on later starts.
