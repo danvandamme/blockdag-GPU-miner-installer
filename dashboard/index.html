@@ -696,6 +696,15 @@
                     </div>
                     <div id="throttleHint" style="margin-top:7px;font-size:11px;line-height:1.5;padding:7px 10px;border-radius:6px;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.05);"></div>
                 </div>
+                <div class="form-group" style="margin-top:14px;">
+                    <label class="form-label" for="cfgAutotune" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                        <input type="checkbox" id="cfgAutotune" style="width:18px;height:18px;flex-shrink:0;accent-color:hsl(142,60%,45%);cursor:pointer;">
+                        <span>Autotune Work-Size <span style="font-size:10px;opacity:0.55;font-weight:400;">(AUTOTUNE)</span></span>
+                    </label>
+                    <div style="margin-top:7px;font-size:11px;line-height:1.5;padding:7px 10px;border-radius:6px;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.05);color:var(--text-dim);">
+                        On first start, briefly tests batch sizes &amp; kernel modes and caches the fastest combo for this GPU. Adds a few minutes the first time; instant afterward. Applied when the miner restarts.
+                    </div>
+                </div>
                 </div><!-- /#gpuControlsSection -->
                 <div class="form-group">
                     <label class="form-label">Mining Mode</label>
@@ -1980,6 +1989,8 @@
                 document.getElementById('cfgGpuThrottle').value = throttle;
                 document.getElementById('throttleVal').textContent = throttle + '%';
                 updateThrottleHint(throttle);
+                const atEl = document.getElementById('cfgAutotune');
+                if (atEl) atEl.checked = (cfg.AUTOTUNE || '0') === '1';
                 setMode(cfg.MINING_MODE || 'both');
                 setStartMode(startMode);
 
@@ -2147,6 +2158,7 @@
                 GPU_ENABLED:   mode === 'cpu' ? '0' : '1',
                 GPU_INTENSITY: document.getElementById('cfgGpuIntensity').value.trim(),
                 GPU_THROTTLE:  document.getElementById('cfgGpuThrottle').value.trim(),
+                AUTOTUNE:      document.getElementById('cfgAutotune').checked ? '1' : '0',
                 GPU_DEVICE:    _getGpuDeviceValue(),
                 MINING_MODE:   mode,
             };
@@ -2186,7 +2198,7 @@
         setTimeout(() => { fetchSysinfo(); setInterval(fetchSysinfo, 15000); }, 3000);
         setInterval(refreshLastShareAge, 1000);
 
-        addLog('DagTech GPU Dashboard v1.0.0 - dagtech.network');
+        addLog('DagTech GPU Dashboard v1.1.0 - dagtech.network');
         addLog('Polling miner metrics every 5 seconds...');
     </script>
 </body>

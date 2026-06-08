@@ -1,6 +1,6 @@
 # Task #40 — Coalesce V-buffer (port plan)
 
-**Status:** ✅ SHIPPED as **GPU-2026.0608.3**. Increments 1–3 of #40 plus #42 (autotune); `.2` adds two operational fixes (config-path resolution, legacy-task cleanup); `.3` exposes the autotune toggle in the installer (prompt defaulting OFF, writes `AUTOTUNE` + `AUTOTUNE_TRIAL_SECONDS` to config.env).
+**Status:** ✅ SHIPPED as **GPU-2026.0608.4**. Increments 1–3 of #40 plus #42 (autotune); `.2` adds two operational fixes (config-path resolution, legacy-task cleanup); `.3` exposes the autotune toggle in the installer (prompt defaulting OFF, writes `AUTOTUNE` + `AUTOTUNE_TRIAL_SECONDS` to config.env); `.4` adds an autotune toggle to the dashboard Config modal (checkbox → writes `AUTOTUNE` via the generic `/config` POST, which restarts the miner to apply). No control-server or exe-code change was needed — the generic `/config` handler plus the `.2` config-path fix carry it end-to-end.
 **Baseline:** GPU-2026.0607.2 on RTX 4060 Laptop (8 GB), 129 KH/s GPU + 9 KH/s CPU, shares 90/91 accepted.
 
 ### Release GPU-2026.0608.1 — what shipped
