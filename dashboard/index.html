@@ -1160,6 +1160,7 @@
             els.difficulty.textContent = data.difficulty.toFixed(8);
             els.jobId.textContent      = data.job_id || '--';
             els.version.textContent    = data.version || '--';
+            if (data.version && !window._dtVersionLogged) { window._dtVersionLogged = true; addLog('Connected to miner ' + data.version); }
             if (els.threads) els.threads.textContent = data.threads;
             // CPU identity for the Config panel (so the thread range is visible while choosing threads)
             const cpuDetInfo = document.getElementById('cpuDetectedInfo');
