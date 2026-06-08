@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0608.2"
+set "VERSION=GPU-2026.0608.3"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -390,6 +390,8 @@ if exist "%CONFIG_FILE%" (
         if "%%k"=="GPU_INTENSITY" set "DEF_GPU_INT=%%l"
         if "%%k"=="GPU_THROTTLE" set "DEF_GPU_THROTTLE=%%l"
         if "%%k"=="START_MODE"    set "DEF_START_MODE=%%l"
+        if "%%k"=="AUTOTUNE"      set "DEF_AUTOTUNE=%%l"
+        if "%%k"=="AUTOTUNE_TRIAL_SECONDS" set "DEF_AUTOTUNE_SEC=%%l"
     )
     echo [GPU Miner] Loaded defaults from existing config.
 )
@@ -497,6 +499,20 @@ if not defined DEF_GPU_THROTTLE set "DEF_GPU_THROTTLE=80"
 echo   GPU throttle limits GPU duty cycle to reduce heat (100 = no limit).
 set /p "GPU_THROTTLE_INPUT=  GPU throttle 5-100 (default !DEF_GPU_THROTTLE!): "
 if "!GPU_THROTTLE_INPUT!"=="" (set "GPU_THROTTLE=!DEF_GPU_THROTTLE!") else (set "GPU_THROTTLE=!GPU_THROTTLE_INPUT!")
+
+echo.
+if not defined DEF_AUTOTUNE     set "DEF_AUTOTUNE=0"
+if not defined DEF_AUTOTUNE_SEC set "DEF_AUTOTUNE_SEC=60"
+echo   GPU autotune sweeps batch sizes/kernel modes once at startup and caches the
+echo   fastest combo. First run adds a few minutes; instant on later starts.
+if "!DEF_AUTOTUNE!"=="1" (set "AT_HINT=Y/n, default yes") else (set "AT_HINT=y/N, default no")
+set /p "AUTOTUNE_INPUT=  Enable GPU autotune? [!AT_HINT!]: "
+set "AUTOTUNE=!DEF_AUTOTUNE!"
+if /i "!AUTOTUNE_INPUT!"=="y"   set "AUTOTUNE=1"
+if /i "!AUTOTUNE_INPUT!"=="yes" set "AUTOTUNE=1"
+if /i "!AUTOTUNE_INPUT!"=="n"   set "AUTOTUNE=0"
+if /i "!AUTOTUNE_INPUT!"=="no"  set "AUTOTUNE=0"
+set "AUTOTUNE_SEC=!DEF_AUTOTUNE_SEC!"
 
 echo.
 set "DEF_PASSWORD_SHOW="
@@ -663,6 +679,8 @@ echo GPU_REC_INTENSITY=!REC_GPU_INT!
 echo GPU_PLATFORM=0
 echo GPU_DEVICE=0
 echo GPU_VENDOR=!GPU_VENDOR!
+echo AUTOTUNE=!AUTOTUNE!
+echo AUTOTUNE_TRIAL_SECONDS=!AUTOTUNE_SEC!
 echo WATCHDOG_RESTART_DELAY=60
 echo WATCHDOG_RETRY_INTERVAL=300
 echo WATCHDOG_MAX_RETRIES=0
