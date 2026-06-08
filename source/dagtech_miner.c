@@ -15,7 +15,7 @@
  *
  * Author:  Dawie Nel <dawie@dagtech.network>
  * Project: DagTech Mining Suite
- * Version: GPU-2026.0608.9
+ * Version: GPU-2026.0608.10
  */
 
 #ifdef _WIN32
@@ -92,7 +92,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0608.9"
+#define DAGTECH_VERSION       "GPU-2026.0608.10"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -1397,6 +1397,28 @@ static AutotuneTrial autotune_run_trial(GpuCtx *ctx, int requested_batchsize,
     return t;
 }
 
+/* Autotune progress marker. Written next to the cache as "<cache>.running"
+ * while a sweep is in progress and removed when it ends, so the control server /
+ * dashboard can show an "Autotune in progress - trial X/Y" banner reliably -
+ * independent of trial length or how much the miner logs (the old log-tail
+ * detection missed long 60s trials whose markers scrolled out of the window). */
+static void autotune_marker_path(char *out, size_t out_size) {
+    snprintf(out, out_size, "%s.running", gpu_autotune_cache);
+}
+static void autotune_write_marker(int trial, int total) {
+    char path[600];
+    autotune_marker_path(path, sizeof(path));
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "trial=%d\ntotal=%d\n", trial, total);
+    fclose(f);
+}
+static void autotune_clear_marker(void) {
+    char path[600];
+    autotune_marker_path(path, sizeof(path));
+    remove(path);
+}
+
 /* Apply a previously-saved autotune result WITHOUT running any trials. Used when
  * AUTOTUNE=0 so a machine that was tuned once keeps its tuned work size + kernel
  * mode ("tune once, toggle off, keep the speed"). No-op (keeps the gpu_init
@@ -1472,6 +1494,7 @@ static int autotune_run(GpuCtx *ctx, int gpu_idx) {
            gpu_idx, n_batches, n_modes, total,
            gpu_autotune_trial_seconds, (total * gpu_autotune_trial_seconds + 30) / 60);
 
+    autotune_write_marker(0, total);  /* banner shows as soon as the sweep starts */
     AutotuneTrial trials[AUTOTUNE_MAX_TRIALS];
     int n_trials = 0;
     int idx = 1;
@@ -1482,6 +1505,7 @@ static int autotune_run(GpuCtx *ctx, int gpu_idx) {
             if (!running) break;
             printf("[Autotune] GPU %d: trial %d/%d batchsize=%d mode=%s ...\n",
                    gpu_idx, idx, total, batches[b], at_mode_int_to_name(modes[i]));
+            autotune_write_marker(idx, total);
             AutotuneTrial t = autotune_run_trial(ctx, batches[b], modes[i],
                                                   gpu_autotune_trial_seconds, gpu_idx);
             if (t.valid) {
@@ -1513,6 +1537,7 @@ static int autotune_run(GpuCtx *ctx, int gpu_idx) {
     }
 
     if (best < 0) {
+        autotune_clear_marker();
         fprintf(stderr, "[Autotune] GPU %d: NO valid trials; falling back to original config.\n", gpu_idx);
         size_t desired = gpu_intensity_to_global_size(ctx->intensity);
         size_t fitted  = gpu_fit_global_size(ctx->device, desired, gpu_idx);
@@ -1527,6 +1552,7 @@ static int autotune_run(GpuCtx *ctx, int gpu_idx) {
     AutotuneTrial *w = &trials[best];
     printf("[Autotune] GPU %d: WINNER batchsize=%d mode=%s score=%.0f (out of %d valid trials)\n",
            gpu_idx, w->actual_batchsize, at_mode_int_to_name(w->mode), w->final_score, valid_count);
+    autotune_clear_marker();
 
     if (gpu_realloc_buffers(ctx, (size_t)w->actual_batchsize, w->mode) != 0) {
         fprintf(stderr, "[Autotune] GPU %d: applying winner failed (realloc).\n", gpu_idx);
@@ -1556,6 +1582,7 @@ static void *dagtech_gpu_thread(void *arg) {
      * the log before normal mining begins. The autotune_run() leaves
      * ctx->global_size and ctx->kernel_mode set to the winner, with V_buf and
      * X_buf already reallocated to match. */
+    autotune_clear_marker();  /* drop any stale marker from a previously-crashed sweep */
     if (gpu_autotune) {
         int waits = 0;
         for (;;) {
