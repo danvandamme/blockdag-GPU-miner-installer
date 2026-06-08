@@ -92,7 +92,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0607.1"
+#define DAGTECH_VERSION       "GPU-2026.0607.2"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"

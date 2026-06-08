@@ -18,7 +18,7 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "VERSION=GPU-2026.0607.1"
+set "VERSION=GPU-2026.0607.2"
 set "INSTALL_DIR=C:\dagtech-gpu-miner"
 set "BIN_DIR=%INSTALL_DIR%\bin"
 set "DASHBOARD_DIR=%INSTALL_DIR%\dashboard"
@@ -119,18 +119,22 @@ if "!GPU_NAME!"=="" (
     echo [GPU Miner] GPU detected: !GPU_NAME!
 )
 
-REM Detect GPU vendor from the GPU name string (AMD / NVIDIA / Intel)
+REM Detect GPU vendor - pick the highest-priority mining target.
+REM Priority: NVIDIA > AMD > Intel. Handles dual-GPU systems (NVIDIA discrete +
+REM AMD/Intel iGPU) where the previous "first findstr wins" logic falsely
+REM returned the iGPU's vendor because AMD/Intel matched before NVIDIA did.
+REM NOTE: do NOT use regex alternation '|' in the PowerShell match expression.
+REM Inside cmd.exe's for /f context, the caret in '^|' survives into the
+REM PowerShell command, and .NET treats '^' as a start-of-string anchor -
+REM so e.g. 'NVIDIA^' can never match mid-string and the whole alternation
+REM falls through silently. Use multiple -match clauses joined with -or instead.
 set "GPU_VENDOR=unknown"
-echo !GPU_NAME! | findstr /i "AMD Radeon" >nul 2>&1
-if not errorlevel 1 set "GPU_VENDOR=amd"
-if "!GPU_VENDOR!"=="unknown" (
-    echo !GPU_NAME! | findstr /i "NVIDIA GeForce Quadro" >nul 2>&1
-    if not errorlevel 1 set "GPU_VENDOR=nvidia"
-)
-if "!GPU_VENDOR!"=="unknown" (
-    echo !GPU_NAME! | findstr /i "Intel" >nul 2>&1
-    if not errorlevel 1 set "GPU_VENDOR=intel"
-)
+for /f "tokens=*" %%v in ('powershell -NoProfile -Command ^
+    "$n = ((Get-WmiObject Win32_VideoController).Name -join ' ');" ^
+    "if ($n -match 'NVIDIA' -or $n -match 'GeForce' -or $n -match 'Quadro' -or $n -match 'RTX' -or $n -match 'GTX' -or $n -match 'Tesla') { 'nvidia' }" ^
+    "elseif ($n -match 'AMD' -or $n -match 'Radeon') { 'amd' }" ^
+    "elseif ($n -match 'Intel') { 'intel' }" ^
+    "else { 'unknown' }" 2^>nul') do set "GPU_VENDOR=%%v"
 if not "!GPU_VENDOR!"=="unknown" echo [GPU Miner] GPU vendor: !GPU_VENDOR!
 
 REM ============================================================================
@@ -140,27 +144,37 @@ REM     Khronos\OpenCL\Vendors registry key empty, so the OpenCL loader finds
 REM     no platforms and the miner reports "No OpenCL platforms found" / 0 H/s.
 REM     We locate the vendor DLL in DriverStore and register it if missing.
 REM ============================================================================
+REM Register every vendor ICD whose DLL is present on the system. Independent
+REM registry entries; registering both on a multi-GPU system lets the miner
+REM switch GPU_PLATFORM at runtime without re-running the installer.
 echo [GPU Miner] Checking OpenCL ICD registry...
-if /i "!GPU_VENDOR!"=="nvidia" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$dll = Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Recurse -Filter 'nvopencl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName;" ^
-        "if ($dll) {" ^
-        "    $reg = 'HKLM:\SOFTWARE\Khronos\OpenCL\Vendors';" ^
-        "    if (-not (Test-Path $reg)) { New-Item -Path $reg -Force | Out-Null };" ^
-        "    $existing = (Get-Item $reg).Property | Where-Object { $_ -like '*nvopencl64*' };" ^
-        "    if (-not $existing) { New-ItemProperty -Path $reg -Name $dll -Value 0 -PropertyType DWORD -Force | Out-Null; Write-Host '[GPU Miner] Registered NVIDIA OpenCL ICD:' $dll } else { Write-Host '[GPU Miner] NVIDIA OpenCL ICD already registered.' }" ^
-        "} else { Write-Host '[GPU Miner] nvopencl64.dll not found - install NVIDIA drivers if GPU shows 0 H/s.' }"
-) else if /i "!GPU_VENDOR!"=="amd" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$dll = Get-ChildItem 'C:\Windows\System32' -Filter 'amdocl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName;" ^
-        "if (-not $dll) { $dll = Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Recurse -Filter 'amdocl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName };" ^
-        "if ($dll) {" ^
-        "    $reg = 'HKLM:\SOFTWARE\Khronos\OpenCL\Vendors';" ^
-        "    if (-not (Test-Path $reg)) { New-Item -Path $reg -Force | Out-Null };" ^
-        "    $existing = (Get-Item $reg).Property | Where-Object { $_ -like '*amdocl64*' };" ^
-        "    if (-not $existing) { New-ItemProperty -Path $reg -Name $dll -Value 0 -PropertyType DWORD -Force | Out-Null; Write-Host '[GPU Miner] Registered AMD OpenCL ICD:' $dll } else { Write-Host '[GPU Miner] AMD OpenCL ICD already registered.' }" ^
-        "} else { Write-Host '[GPU Miner] amdocl64.dll not found - install AMD Radeon Software if GPU shows 0 H/s.' }"
-)
+
+REM NVIDIA ICD - register if nvopencl64.dll is present in DriverStore
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$dll = Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Recurse -Filter 'nvopencl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName;" ^
+    "if ($dll) {" ^
+    "    $reg = 'HKLM:\SOFTWARE\Khronos\OpenCL\Vendors';" ^
+    "    if (-not (Test-Path $reg)) { New-Item -Path $reg -Force | Out-Null };" ^
+    "    $existing = (Get-Item $reg).Property | Where-Object { $_ -like '*nvopencl64*' };" ^
+    "    if (-not $existing) { New-ItemProperty -Path $reg -Name $dll -Value 0 -PropertyType DWORD -Force | Out-Null; Write-Host '[GPU Miner] Registered NVIDIA OpenCL ICD:' $dll } else { Write-Host '[GPU Miner] NVIDIA OpenCL ICD already registered.' }" ^
+    "}"
+
+REM AMD ICD - register if amdocl64.dll is present (System32 or DriverStore)
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$dll = Get-ChildItem 'C:\Windows\System32' -Filter 'amdocl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName;" ^
+    "if (-not $dll) { $dll = Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Recurse -Filter 'amdocl64.dll' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName };" ^
+    "if ($dll) {" ^
+    "    $reg = 'HKLM:\SOFTWARE\Khronos\OpenCL\Vendors';" ^
+    "    if (-not (Test-Path $reg)) { New-Item -Path $reg -Force | Out-Null };" ^
+    "    $existing = (Get-Item $reg).Property | Where-Object { $_ -like '*amdocl64*' };" ^
+    "    if (-not $existing) { New-ItemProperty -Path $reg -Name $dll -Value 0 -PropertyType DWORD -Force | Out-Null; Write-Host '[GPU Miner] Registered AMD OpenCL ICD:' $dll } else { Write-Host '[GPU Miner] AMD OpenCL ICD already registered.' }" ^
+    "}"
+
+REM Warn only if no vendor's ICD got registered (no GPU drivers found anywhere)
+powershell -NoProfile -Command ^
+    "$reg = 'HKLM:\SOFTWARE\Khronos\OpenCL\Vendors';" ^
+    "$entries = if (Test-Path $reg) { (Get-Item $reg).Property } else { @() };" ^
+    "if (-not $entries -or $entries.Count -eq 0) { Write-Host '[GPU Miner] WARNING: No OpenCL ICDs registered - install GPU drivers if GPU shows 0 H/s.' }"
 
 REM ============================================================================
 REM 2. Find C Compiler
