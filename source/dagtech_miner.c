@@ -92,7 +92,7 @@
 /* =========================================================================
  * DagTech GPU Miner Configuration
  * ========================================================================= */
-#define DAGTECH_VERSION       "GPU-2026.0607.3"
+#define DAGTECH_VERSION       "GPU-2026.0607.4"
 #define DAGTECH_BANNER        "DagTech GPU Miner v" DAGTECH_VERSION " - dagtech.network"
 #define DAGTECH_AUTHOR        "Dawie Nel / DagTech Ltd"
 #define DAGTECH_DEFAULT_POOL  "excalibur.dagtech.network"
@@ -433,8 +433,15 @@ typedef struct {
     cl_context       ctx;
     cl_command_queue queue;
     cl_program       program;
-    cl_kernel        kernel;
+    cl_kernel        kernel;          /* legacy single-kernel: dagtech_search */
+    /* GPU-2026.0607.4 (#40 increment 2): split-kernel handles. NULL when
+       kernel_mode == 0 (legacy). Created opportunistically; on any failure
+       we fall back to legacy without failing init. */
+    cl_kernel        kernel_pre;
+    cl_kernel        kernel_romix;
+    cl_kernel        kernel_post;
     cl_mem           V_buf;
+    cl_mem           X_buf;           /* intermediate X[32]/work-item, split-mode only */
     cl_mem           output_buf;
     size_t           global_size;
     int              platform_idx;
@@ -443,6 +450,7 @@ typedef struct {
     volatile int     ready;
     char             name[256];
     int              intensity;        /* actual intensity used for this GPU */
+    int              kernel_mode;      /* 0 = legacy single-kernel, 1 = split (pre/romix/post) */
     uint64_t         hashes_session;   /* per-GPU hash counter */
     double           hashrate;         /* per-GPU H/s updated by stats loop */
 } GpuCtx;
@@ -689,6 +697,51 @@ static int gpu_init_one(GpuCtx *ctx, cl_platform_id platform, int platform_idx,
         return -1;
     }
 
+    /* GPU-2026.0607.4 (#40 increment 2): try to set up split-kernel mode
+     * (dagtech_pre + dagtech_romix + dagtech_post). On any failure, leave
+     * kernel_mode=0 so the gpu_thread dispatches the legacy dagtech_search. */
+    ctx->kernel_pre = ctx->kernel_romix = ctx->kernel_post = NULL;
+    ctx->X_buf = NULL;
+    ctx->kernel_mode = 0;
+    {
+        int want_split = 1;
+        const char *km = getenv("GPU_KERNEL_MODE");
+        if (km && (strcmp(km, "legacy") == 0 || strcmp(km, "0") == 0)) want_split = 0;
+
+        if (want_split) {
+            cl_int e1 = 0, e2 = 0, e3 = 0;
+            ctx->kernel_pre   = clCreateKernel(ctx->program, "dagtech_pre",   &e1);
+            ctx->kernel_romix = clCreateKernel(ctx->program, "dagtech_romix", &e2);
+            ctx->kernel_post  = clCreateKernel(ctx->program, "dagtech_post",  &e3);
+            if (e1 != CL_SUCCESS || e2 != CL_SUCCESS || e3 != CL_SUCCESS) {
+                fprintf(stderr, "[DagTech GPU] GPU %d: split-kernel create failed "
+                                "(pre=%d romix=%d post=%d) — falling back to legacy.\n",
+                                gpu_index, e1, e2, e3);
+                if (ctx->kernel_pre)   { clReleaseKernel(ctx->kernel_pre);   ctx->kernel_pre   = NULL; }
+                if (ctx->kernel_romix) { clReleaseKernel(ctx->kernel_romix); ctx->kernel_romix = NULL; }
+                if (ctx->kernel_post)  { clReleaseKernel(ctx->kernel_post);  ctx->kernel_post  = NULL; }
+            } else {
+                size_t x_bytes = ctx->global_size * 32 * sizeof(cl_uint);
+                cl_int xerr = 0;
+                ctx->X_buf = clCreateBuffer(ctx->ctx, CL_MEM_READ_WRITE, x_bytes, NULL, &xerr);
+                if (xerr != CL_SUCCESS) {
+                    fprintf(stderr, "[DagTech GPU] GPU %d: X_buf alloc failed (err %d) "
+                                    "— falling back to legacy.\n", gpu_index, xerr);
+                    clReleaseKernel(ctx->kernel_pre);   ctx->kernel_pre   = NULL;
+                    clReleaseKernel(ctx->kernel_romix); ctx->kernel_romix = NULL;
+                    clReleaseKernel(ctx->kernel_post);  ctx->kernel_post  = NULL;
+                } else {
+                    ctx->kernel_mode = 1;
+                    printf("[DagTech GPU] GPU %d: split-kernel mode (X_buf %.2f MB)\n",
+                           gpu_index, x_bytes / (1024.0 * 1024.0));
+                }
+            }
+        } else {
+            printf("[DagTech GPU] GPU %d: legacy single-kernel mode (GPU_KERNEL_MODE=legacy)\n",
+                   gpu_index);
+        }
+    }
+
     ctx->ready = 1;
     return 0;
 }
@@ -875,18 +928,47 @@ static void *dagtech_gpu_thread(void *arg) {
             clEnqueueWriteBuffer(ctx->queue, ctx->output_buf, CL_TRUE, 0,
                                  2 * sizeof(cl_uint), output_init, 0, NULL, NULL);
 
-            /* Set kernel args */
-            clSetKernelArg(ctx->kernel, 0, sizeof(cl_mem), &header_buf);
-            clSetKernelArg(ctx->kernel, 1, sizeof(cl_mem), &ctx->output_buf);
-            clSetKernelArg(ctx->kernel, 2, sizeof(cl_mem), &ctx->V_buf);
-            clSetKernelArg(ctx->kernel, 3, sizeof(cl_uint), &target32);
-            clSetKernelArg(ctx->kernel, 4, sizeof(cl_uint), &nonce_base);
-
-            /* Launch */
+            /* Launch (legacy single-kernel or split pre/romix/post) */
             uint64_t gpu_t0 = dagtech_now_ms();
-            cl_event ev;
-            cl_int err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel, 1, NULL,
+            cl_event ev = NULL;
+            cl_int err;
+            if (ctx->kernel_mode == 1) {
+                /* Split-kernel mode (#40 increment 2).
+                 * Queue is in-order, so intermediate enqueues don't need events;
+                 * only the final dagtech_post produces the event we wait on -
+                 * which can't complete until pre and romix have finished. The
+                 * <2ms "implausibly fast" guard below measures from gpu_t0 to
+                 * the event completion, so it still catches the all-no-op case. */
+                clSetKernelArg(ctx->kernel_pre, 0, sizeof(cl_mem),  &header_buf);
+                clSetKernelArg(ctx->kernel_pre, 1, sizeof(cl_mem),  &ctx->X_buf);
+                clSetKernelArg(ctx->kernel_pre, 2, sizeof(cl_uint), &nonce_base);
+                err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_pre, 1, NULL,
+                                             &ctx->global_size, NULL, 0, NULL, NULL);
+                if (err == CL_SUCCESS) {
+                    clSetKernelArg(ctx->kernel_romix, 0, sizeof(cl_mem), &ctx->X_buf);
+                    clSetKernelArg(ctx->kernel_romix, 1, sizeof(cl_mem), &ctx->V_buf);
+                    err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_romix, 1, NULL,
+                                                 &ctx->global_size, NULL, 0, NULL, NULL);
+                }
+                if (err == CL_SUCCESS) {
+                    clSetKernelArg(ctx->kernel_post, 0, sizeof(cl_mem),  &ctx->X_buf);
+                    clSetKernelArg(ctx->kernel_post, 1, sizeof(cl_mem),  &header_buf);
+                    clSetKernelArg(ctx->kernel_post, 2, sizeof(cl_mem),  &ctx->output_buf);
+                    clSetKernelArg(ctx->kernel_post, 3, sizeof(cl_uint), &target32);
+                    clSetKernelArg(ctx->kernel_post, 4, sizeof(cl_uint), &nonce_base);
+                    err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel_post, 1, NULL,
                                                  &ctx->global_size, NULL, 0, NULL, &ev);
+                }
+            } else {
+                /* Legacy: one big dagtech_search does the whole pipeline */
+                clSetKernelArg(ctx->kernel, 0, sizeof(cl_mem),  &header_buf);
+                clSetKernelArg(ctx->kernel, 1, sizeof(cl_mem),  &ctx->output_buf);
+                clSetKernelArg(ctx->kernel, 2, sizeof(cl_mem),  &ctx->V_buf);
+                clSetKernelArg(ctx->kernel, 3, sizeof(cl_uint), &target32);
+                clSetKernelArg(ctx->kernel, 4, sizeof(cl_uint), &nonce_base);
+                err = clEnqueueNDRangeKernel(ctx->queue, ctx->kernel, 1, NULL,
+                                             &ctx->global_size, NULL, 0, NULL, &ev);
+            }
             if (err != CL_SUCCESS) {
                 kernel_errors++;
                 if (kernel_errors <= 3 || (kernel_errors % 50) == 0)

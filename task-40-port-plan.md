@@ -103,7 +103,9 @@ Each increment ends with the same gate: **build → run → check `gpu_hashrate`
 - `source/dagtech_gpu.cl`: keep `dagtech_search` for backward compat, **add** `dagtech_start`, `dagtech_romix`, `dagtech_tweak`, `dagtech_finish` kernels. Each does one stage and reads/writes intermediate state to/from `__global` buffers.
 - `source/dagtech_miner.c`: in `dagtech_gpu_thread`, replace the single `clEnqueueNDRangeKernel` (line 888) with a sequence of four enqueues. Allocate the intermediate buffers (`tstate_buf`, `ostate_buf`, `X_buf`) once at context init.
 
-**Expected win:** zero or slightly negative on its own — splitting adds per-launch overhead. The *purpose* of this increment is to unlock Increment 3 (cooperative threads in `dagtech_romix` only, without breaking the other stages) and to make each kernel small enough to never exceed Windows TDR even at high `global_size`.
+**Expected win (predicted):** zero or slightly negative on its own — splitting adds per-launch overhead. The *purpose* of this increment is to unlock Increment 3 (cooperative threads in `dagtech_romix` only, without breaking the other stages) and to make each kernel small enough to never exceed Windows TDR even at high `global_size`.
+
+**Actual measured win (RTX 4060 Laptop, diff 10.448):** **+90% over Inc1, +112% over baseline.** Steady-state went from 143 KH/s → ~272 KH/s. Best explanation: the single `dagtech_search` kernel had high register pressure that capped warp occupancy per SM. Three smaller kernels each fit in a smaller register footprint, so the GPU keeps many more warps live simultaneously. This matches the reference miner's `hasher_combo_kernel` comment: "the two individual kernels can use fewer registers alone." The prediction missed this entirely — splitting wasn't just a structural prerequisite for #3, it was an occupancy win in its own right.
 
 **Risk:** medium. State has to flow between kernels via global buffers. Any byte-order or layout mismatch surfaces as zero accepted shares.
 

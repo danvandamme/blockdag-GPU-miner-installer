@@ -448,3 +448,168 @@ __kernel void dagtech_search(__global const uint *header80,
         atomic_inc(&output[1]);
     }
 }
+
+/* =========================================================================
+ * GPU-2026.0607.4 (#40 increment 2): split-kernel pipeline
+ *
+ * Same algorithm as dagtech_search, but partitioned into three kernels
+ * sharing an intermediate X_buf (one 32-uint slot per work-item):
+ *
+ *   dagtech_pre   : steps 1-3, write X[32] into X_buf
+ *   dagtech_romix : read X from X_buf, run scrypt_romix, write X back
+ *   dagtech_post  : read X from X_buf, recompute tstate/ostate,
+ *                   apply post-ROMix X[0] tweak, run pbkdf2_128_32,
+ *                   check target
+ *
+ * Rationale: isolates the ROMix step so a future increment can rewrite
+ * its work-item layout (4-threads-per-hash + interleaved V) without
+ * touching the surrounding kernels. tstate/ostate recomputed in post
+ * (cost: 1 SHA256 + 4 hmac transforms = trivial vs. 2048 PBKDF2 rounds).
+ *
+ * dagtech_search remains compiled for the legacy single-kernel fallback
+ * path (GPU_KERNEL_MODE=legacy).
+ * ========================================================================= */
+
+/* --- dagtech_pre: steps 1-3, output X[gid*32 + 0..31] in global X_buf --- */
+__kernel void dagtech_pre(__global const uint *header80,
+                          __global uint *X_buf,
+                          uint nonce_base)
+{
+    uint gid   = get_global_id(0);
+    uint nonce = nonce_base + gid;
+
+    __private uint hdr[20];
+    for (int i = 0; i < 20; i++) hdr[i] = header80[i];
+    hdr[19] = nonce;
+
+    /* Step 1: midstate */
+    __private uint tstate[8];
+    tstate[0]=SHA256_IV_0; tstate[1]=SHA256_IV_1;
+    tstate[2]=SHA256_IV_2; tstate[3]=SHA256_IV_3;
+    tstate[4]=SHA256_IV_4; tstate[5]=SHA256_IV_5;
+    tstate[6]=SHA256_IV_6; tstate[7]=SHA256_IV_7;
+    sha256_xform(tstate,
+        hdr[0],  hdr[1],  hdr[2],  hdr[3],
+        hdr[4],  hdr[5],  hdr[6],  hdr[7],
+        hdr[8],  hdr[9],  hdr[10], hdr[11],
+        hdr[12], hdr[13], hdr[14], hdr[15]);
+
+    /* Step 2: hmac80 init */
+    __private uint ostate[8];
+    hmac80_init(hdr, tstate, ostate);
+
+    /* Step 3: pbkdf2 80 -> 128 (output X[32]) */
+    __private uint X[32];
+    pbkdf2_80_128(tstate, ostate, hdr, X);
+
+    /* Persist X to global X_buf. uint4 stores; X_buf is clCreateBuffer-
+       aligned and gid*32 is multiple of 128 bytes -> safe cast. */
+    __global uint4 *Xp = (__global uint4 *)(X_buf + (size_t)gid * 32);
+    Xp[0] = (uint4)(X[ 0], X[ 1], X[ 2], X[ 3]);
+    Xp[1] = (uint4)(X[ 4], X[ 5], X[ 6], X[ 7]);
+    Xp[2] = (uint4)(X[ 8], X[ 9], X[10], X[11]);
+    Xp[3] = (uint4)(X[12], X[13], X[14], X[15]);
+    Xp[4] = (uint4)(X[16], X[17], X[18], X[19]);
+    Xp[5] = (uint4)(X[20], X[21], X[22], X[23]);
+    Xp[6] = (uint4)(X[24], X[25], X[26], X[27]);
+    Xp[7] = (uint4)(X[28], X[29], X[30], X[31]);
+}
+
+/* --- dagtech_romix: read X, run scrypt_romix using V_slice, write X back --- */
+__kernel void dagtech_romix(__global uint *X_buf,
+                            __global uint *V)
+{
+    uint gid = get_global_id(0);
+
+    /* Load X[32] from global X_buf into private */
+    __private uint X[32];
+    __global uint4 *Xp = (__global uint4 *)(X_buf + (size_t)gid * 32);
+    uint4 v;
+    v = Xp[0]; X[ 0]=v.x; X[ 1]=v.y; X[ 2]=v.z; X[ 3]=v.w;
+    v = Xp[1]; X[ 4]=v.x; X[ 5]=v.y; X[ 6]=v.z; X[ 7]=v.w;
+    v = Xp[2]; X[ 8]=v.x; X[ 9]=v.y; X[10]=v.z; X[11]=v.w;
+    v = Xp[3]; X[12]=v.x; X[13]=v.y; X[14]=v.z; X[15]=v.w;
+    v = Xp[4]; X[16]=v.x; X[17]=v.y; X[18]=v.z; X[19]=v.w;
+    v = Xp[5]; X[20]=v.x; X[21]=v.y; X[22]=v.z; X[23]=v.w;
+    v = Xp[6]; X[24]=v.x; X[25]=v.y; X[26]=v.z; X[27]=v.w;
+    v = Xp[7]; X[28]=v.x; X[29]=v.y; X[30]=v.z; X[31]=v.w;
+
+    /* Run the (uint4-vectorised) Fill+Mix using this work-item's V slice */
+    __global uint *V_slice = V + (size_t)gid * (size_t)(1024 * 32);
+    scrypt_romix(X, V_slice);
+
+    /* Write X back to X_buf */
+    Xp[0] = (uint4)(X[ 0], X[ 1], X[ 2], X[ 3]);
+    Xp[1] = (uint4)(X[ 4], X[ 5], X[ 6], X[ 7]);
+    Xp[2] = (uint4)(X[ 8], X[ 9], X[10], X[11]);
+    Xp[3] = (uint4)(X[12], X[13], X[14], X[15]);
+    Xp[4] = (uint4)(X[16], X[17], X[18], X[19]);
+    Xp[5] = (uint4)(X[20], X[21], X[22], X[23]);
+    Xp[6] = (uint4)(X[24], X[25], X[26], X[27]);
+    Xp[7] = (uint4)(X[28], X[29], X[30], X[31]);
+}
+
+/* --- dagtech_post: read X, recompute tstate/ostate, tweak, pbkdf2 128->32,
+       compare hash[7] vs target, atomic_min into output --- */
+__kernel void dagtech_post(__global uint *X_buf,
+                           __global const uint *header80,
+                           __global uint *output,
+                           uint target,
+                           uint nonce_base)
+{
+    uint gid   = get_global_id(0);
+    uint nonce = nonce_base + gid;
+
+    /* Load X[32] from X_buf */
+    __private uint X[32];
+    __global uint4 *Xp = (__global uint4 *)(X_buf + (size_t)gid * 32);
+    uint4 v;
+    v = Xp[0]; X[ 0]=v.x; X[ 1]=v.y; X[ 2]=v.z; X[ 3]=v.w;
+    v = Xp[1]; X[ 4]=v.x; X[ 5]=v.y; X[ 6]=v.z; X[ 7]=v.w;
+    v = Xp[2]; X[ 8]=v.x; X[ 9]=v.y; X[10]=v.z; X[11]=v.w;
+    v = Xp[3]; X[12]=v.x; X[13]=v.y; X[14]=v.z; X[15]=v.w;
+    v = Xp[4]; X[16]=v.x; X[17]=v.y; X[18]=v.z; X[19]=v.w;
+    v = Xp[5]; X[20]=v.x; X[21]=v.y; X[22]=v.z; X[23]=v.w;
+    v = Xp[6]; X[24]=v.x; X[25]=v.y; X[26]=v.z; X[27]=v.w;
+    v = Xp[7]; X[28]=v.x; X[29]=v.y; X[30]=v.z; X[31]=v.w;
+
+    /* Recompute tstate/ostate (cheap: SHA256_IV -> midstate(hdr[0..15]),
+       then hmac80_init(hdr,...) -> 4 sha256_xform calls total). The
+       per-nonce hdr[19] doesn't affect midstate (which only uses
+       hdr[0..15]) or hmac80_init's tstate (which uses hdr[16..19] but
+       the proprietary tweak is bit-identical regardless of nonce since
+       the algorithm operates on the same word positions). */
+    __private uint hdr[20];
+    for (int i = 0; i < 20; i++) hdr[i] = header80[i];
+    hdr[19] = nonce;
+
+    __private uint tstate[8];
+    tstate[0]=SHA256_IV_0; tstate[1]=SHA256_IV_1;
+    tstate[2]=SHA256_IV_2; tstate[3]=SHA256_IV_3;
+    tstate[4]=SHA256_IV_4; tstate[5]=SHA256_IV_5;
+    tstate[6]=SHA256_IV_6; tstate[7]=SHA256_IV_7;
+    sha256_xform(tstate,
+        hdr[0],  hdr[1],  hdr[2],  hdr[3],
+        hdr[4],  hdr[5],  hdr[6],  hdr[7],
+        hdr[8],  hdr[9],  hdr[10], hdr[11],
+        hdr[12], hdr[13], hdr[14], hdr[15]);
+    __private uint ostate[8];
+    hmac80_init(hdr, tstate, ostate);
+
+    /* Step 5: post-ROMix X[0] tweak (bit-identical to dagtech_search) */
+    {
+        uint B = BSWAP(X[0]);
+        uint M = (B & 0xffff8000u) | ((B + 0xe0u) & 0x7fffu);
+        X[0]  = BSWAP(M);
+    }
+
+    /* Step 6: pbkdf2 128 -> 32 */
+    __private uint hash[8];
+    pbkdf2_128_32(tstate, ostate, X, hash);
+
+    /* Step 7: target check */
+    if (hash[7] <= target) {
+        atomic_min(&output[0], nonce);
+        atomic_inc(&output[1]);
+    }
+}
